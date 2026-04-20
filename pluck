@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# pluck — download a file, folder, or repo from a git host URL, without .git
+set -euo pipefail
+
+# --- style ---
+if [[ -t 2 ]]; then
+    B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
+    C=$'\033[36m' W=$'\033[37m' X=$'\033[0m'
+else
+    B= D= G= R= C= W= X=
+fi
+
+_ok()   { printf '%s\n' "${G}ok${X}  ${D}$*${X}" >&2; }
+_err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
+_info() { printf '%s\n' "${D}$*${X}" >&2; }
+_die()  { _err "$*"; exit 1; }
+
+# --- summary helpers ---
+
+_commas() {
+    awk '{
+        n=$0; out=""
+        while (length(n) > 3) {
+            out = "," substr(n, length(n)-2) out
+            n = substr(n, 1, length(n)-3)
+        }
+        print n out
+    }' <<<"$1"
+}
+
+_format_bytes() {
+    local b=${1:-0}
+    if   (( b < 1024 ));       then printf '%d B' "$b"
+    elif (( b < 1048576 ));    then awk -v b="$b" 'BEGIN{printf "%.1f KB", b/1024}'
+    elif (( b < 1073741824 )); then awk -v b="$b" 'BEGIN{printf "%.1f MB", b/1048576}'
+    else                            awk -v b="$b" 'BEGIN{printf "%.1f GB", b/1073741824}'
+    fi
+}
+
+# Recursive tree. $1=dir, $2=line prefix. bash-3.2 safe (no mapfile).
+_tree() {
+    local path="$1" prefix="$2"
+    local entries=() e
+    while IFS= read -r e; do
+        entries+=("$e")
+    done < <(find "$path" -mindepth 1 -maxdepth 1 2>/dev/null | sort)
+
+    local count=${#entries[@]} i=0 name connector next
+    # bash 3.2 + set -u crashes on "${empty_array[@]}"; early-return on empty dirs.
+    (( count == 0 )) && return
+    for e in "${entries[@]}"; do
+        i=$((i+1))
+        name=$(basename "$e")
+        if (( i == count )); then connector="└──"; next="${prefix}    "
+        else                      connector="├──"; next="${prefix}│   "
+        fi
+        if [[ -d $e ]]; then
+            printf '%s%s %s/\n' "$prefix" "$connector" "$name"
+            _tree "$e" "$next"
+        else
+            printf '%s%s %s\n' "$prefix" "$connector" "$name"
+        fi
+    done
+}
+
+# Top-level preview of $OUT: up to 8 entries with size/item-count metadata.
+_preview() {
+    local entries=() e
+    while IFS= read -r e; do
+        entries+=("$e")
+    done < <(find "$OUT" -mindepth 1 -maxdepth 1 2>/dev/null | sort)
+
+    local count=${#entries[@]} shown=0 name sub
+    (( count == 0 )) && return
+    for e in "${entries[@]}"; do
+        (( shown >= 8 )) && break
+        name=$(basename "$e")
+        if [[ -d $e ]]; then
+            sub=$(find "$e" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')
+            local lbl="items"; (( sub == 1 )) && lbl="item"
+            printf '    %-20s %s·  %s %s%s\n' "$name/" "$D" "$sub" "$lbl" "$X"
+        else
+            sub=$(stat -f%z "$e" 2>/dev/null || echo 0)
+            printf '    %-20s %s·  %s%s\n' "$name" "$D" "$(_format_bytes "$sub")" "$X"
+        fi
+        shown=$((shown + 1))
+    done
+    if (( count > shown )); then
+        printf '    %s… %d more at root%s\n' "$D" "$((count - shown))" "$X"
+    fi
+}
+
+# Post-download summary. Writes to stderr (stdout reserved for downloaded content).
+_summary() {
+    {
+        if [[ -f $OUT ]]; then
+            local size
+            size=$(_format_bytes "$(stat -f%z "$OUT" 2>/dev/null || echo 0)")
+            printf '\n'
+            printf '%s\n' "${G}ok${X}  ${D}done →${X} ${W}$OUT${X} ${D}($size)${X}"
+        else
+            local files dirs bytes total size
+            files=$(find "$OUT" -type f 2>/dev/null | wc -l | tr -d ' ')
+            dirs=$(find "$OUT" -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+            # du -sk is portable and fast; slight over-count vs exact file bytes is fine here.
+            bytes=$(du -sk "$OUT" 2>/dev/null | awk '{print $1 * 1024; exit}')
+            total=$((files + dirs))
+            size=$(_format_bytes "${bytes:-0}")
+
+            local f_lbl="files" d_lbl="folders"
+            (( files == 1 )) && f_lbl="file"
+            (( dirs  == 1 )) && d_lbl="folder"
+
+            printf '\n'
+            printf '%s\n' "${G}ok${X}  ${D}done →${X} ${W}$OUT${X}"
+            printf '    %s%s %s · %s %s · %s%s\n' "$D" "$(_commas "$files")" "$f_lbl" "$(_commas "$dirs")" "$d_lbl" "$size" "$X"
+            printf '\n'
+
+            if (( TREE )) || (( total <= 20 )); then
+                printf '    %s%s%s\n' "$W" "$OUT" "$X"
+                _tree "$OUT" "    "
+            else
+                _preview
+            fi
+        fi
+    } >&2
+}
+
+usage() {
+  printf '\n'
+  printf '%s%s' "$B" "$C"
+  cat <<'BANNER'
+          ______            ______
+  ___________  /___  __________  /__
+  ___  __ \_  /_  / / /  ___/_  //_/
+  __  /_/ /  / / /_/ // /__ _  ,<
+  _  .___//_/  \__,_/ \___/ /_/|_|
+  /_/
+BANNER
+  printf '%s\n' "$X"
+  cat <<EOF
+  ${B}pluck${X} ${D}— download a file, folder, or repo from a git host URL, without .git${X}
+
+${C}Usage:${X}
+  pluck <url> [destination] [options]
+
+${C}Destination:${X}
+  (omitted)          Download into current dir with default name (repo or subpath basename)
+  ./path/thing       Explicit output path (file or directory)
+  ./parent/          Trailing slash or existing dir → download into it with default name
+
+${C}Options:${X}
+  -o, --out <path>   Same as the positional destination (flag form)
+  -r, --ref <ref>    Override branch/tag/commit (use when ref contains slashes)
+  -t, --tree         Show the full extracted tree (default: compact preview)
+  -f, --force        Overwrite the destination if it already exists
+      --sparse       git partial clone + sparse-checkout (best for huge repos)
+      --keep-git     Keep the .git directory (only with --sparse)
+  -h, --help         Show this help
+
+${C}URL forms (GitHub):${X}
+  https://github.com/OWNER/REPO                          whole repo
+  https://github.com/OWNER/REPO/tree/REF                 whole repo at ref
+  https://github.com/OWNER/REPO/tree/REF/PATH            folder
+  https://github.com/OWNER/REPO/blob/REF/PATH            single file
+  https://github.com/OWNER/REPO/raw/REF/PATH             single file
+  https://raw.githubusercontent.com/OWNER/REPO/REF/PATH  single file
+  OWNER/REPO                                             shorthand (whole repo)
+
+${C}Examples:${X}
+  pluck https://github.com/vercel/next.js/blob/canary/README.md
+  pluck https://github.com/vercel/next.js/tree/canary/packages/create-next-app
+  pluck https://github.com/torvalds/linux/tree/master/kernel/sched --sparse
+  pluck vercel/ai                         # → ./ai
+  pluck vercel/ai ai-sdk                  # → ./ai-sdk
+  pluck vercel/ai ~/Downloads/            # → ~/Downloads/ai  (trailing slash = parent dir)
+EOF
+}
+
+# --- args ---
+URL=""; DEST=""; REF_OVERRIDE=""; SPARSE=0; KEEP_GIT=0; TREE=0; FORCE=0
+while (( $# )); do
+  case $1 in
+    -h|--help)      usage; exit 0 ;;
+    -o|--out)       [[ $# -ge 2 ]] || _die "--out needs a value"
+                    [[ -n $DEST ]] && _die "destination given twice (positional + --out)"
+                    DEST=$2; shift 2 ;;
+    -r|--ref)       [[ $# -ge 2 ]] || _die "--ref needs a value"; REF_OVERRIDE=$2; shift 2 ;;
+    -t|--tree)      TREE=1; shift ;;
+    -f|--force)     FORCE=1; shift ;;
+    --sparse)       SPARSE=1; shift ;;
+    --keep-git)     KEEP_GIT=1; shift ;;
+    --)             shift
+                    [[ -z $URL  && $# -gt 0 ]] && { URL=$1;  shift; }
+                    [[ -z $DEST && $# -gt 0 ]] && { DEST=$1; shift; }
+                    (( $# )) && _die "unexpected argument: $1"
+                    break ;;
+    -*)             _die "unknown flag: $1" ;;
+    *)              if   [[ -z $URL  ]]; then URL=$1
+                    elif [[ -z $DEST ]]; then DEST=$1
+                    else _die "unexpected argument: $1"
+                    fi
+                    shift ;;
+  esac
+done
+[[ -z $URL ]] && { usage >&2; exit 1; }
+
+# --- parse URL ---
+OWNER=""; REPO=""; KIND=""; REF=""; SUBPATH=""
+u=${URL%/}
+
+if [[ $u =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  OWNER=${u%/*}; REPO=${u#*/}; REPO=${REPO%.git}; KIND=repo
+elif [[ $u =~ ^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$ ]]; then
+  OWNER=${BASH_REMATCH[1]}
+  REPO=${BASH_REMATCH[2]%.git}
+  REF=${BASH_REMATCH[3]}
+  SUBPATH=${BASH_REMATCH[4]}
+  KIND=blob
+elif [[ $u =~ ^https?://github\.com/([^/]+)/([^/]+)(/.*)?$ ]]; then
+  OWNER=${BASH_REMATCH[1]}
+  REPO=${BASH_REMATCH[2]%.git}
+  rest=${BASH_REMATCH[3]:-}
+  if [[ -z $rest ]]; then
+    KIND=repo
+  elif [[ $rest =~ ^/(tree|blob|raw)/(.+)$ ]]; then
+    mode=${BASH_REMATCH[1]}; rp=${BASH_REMATCH[2]}
+    REF=${rp%%/*}
+    [[ $rp == */* ]] && SUBPATH=${rp#*/}
+    case $mode in tree) KIND=tree ;; blob|raw) KIND=blob ;; esac
+  else
+    _die "unsupported GitHub URL path: $rest"
+  fi
+else
+  _die "unsupported URL: $URL"
+fi
+
+# --- apply --ref override ---
+# URLs like .../tree/feat/foo/bar are ambiguous: is the branch "feat" with path
+# "foo/bar", or branch "feat/foo" with path "bar"? Default parser takes the first
+# slash as the split; --ref lets the user disambiguate by specifying the full ref.
+if [[ -n $REF_OVERRIDE ]]; then
+  combined="${REF}${SUBPATH:+/$SUBPATH}"
+  if [[ $combined == "$REF_OVERRIDE" ]]; then
+    SUBPATH=""
+  elif [[ $combined == "$REF_OVERRIDE"/* ]]; then
+    SUBPATH=${combined#"$REF_OVERRIDE"/}
+  fi
+  REF=$REF_OVERRIDE
+fi
+
+# --- resolve default branch if unknown ---
+if [[ -z $REF ]]; then
+  REF=$(curl -fsSL "https://api.github.com/repos/$OWNER/$REPO" 2>/dev/null \
+          | awk -F'"' '/"default_branch"/{print $4; exit}')
+  [[ -z $REF ]] && REF=HEAD
+fi
+
+# --- resolve destination ---
+# Default name: the subpath's basename for files/folders, the repo name otherwise.
+if [[ $KIND == blob || -n $SUBPATH ]]; then
+  NAME=$(basename "$SUBPATH")
+else
+  NAME=$REPO
+fi
+
+# DEST rules:
+#   empty                     → drop into cwd with default name
+#   ends with / or is a dir   → treat as parent, append default name
+#   anything else             → treat as the full output path
+if [[ -z $DEST ]]; then
+  OUT=$NAME
+elif [[ $DEST == */ || -d $DEST ]]; then
+  OUT="${DEST%/}/$NAME"
+else
+  OUT=$DEST
+fi
+
+# Fail loudly if the destination already exists — matches `git clone`. Empty
+# dirs pass through; mkdir -p below is a no-op on them.
+if [[ -e $OUT ]]; then
+  if [[ -f $OUT ]]; then
+    (( FORCE )) || _die "destination exists: $OUT  ${D}(use -f to overwrite)${X}"
+    rm -f "$OUT"
+  elif [[ -d $OUT && -n $(ls -A "$OUT" 2>/dev/null) ]]; then
+    (( FORCE )) || _die "destination exists and is non-empty: $OUT  ${D}(use -f to overwrite)${X}"
+    rm -rf "$OUT"
+  fi
+fi
+
+printf '%s\n' "${C}→${X} $OWNER/$REPO @ ${W}$REF${X}${SUBPATH:+ :: $SUBPATH}  ${D}[$KIND]${X} → ${W}$OUT${X}" >&2
+
+# --- dispatch ---
+case $KIND in
+  blob)
+    url="https://raw.githubusercontent.com/$OWNER/$REPO/$REF/$SUBPATH"
+    outdir=$(dirname "$OUT")
+    [[ $outdir != . && $outdir != / ]] && mkdir -p "$outdir"
+    curl -fL --progress-bar -o "$OUT" "$url" \
+      || _die "fetch failed: $url"
+    ;;
+
+  tree|repo)
+    mkdir -p "$OUT"
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    if (( SPARSE )); then
+      # 7+ hex chars = likely a commit SHA. Could false-positive on a branch
+      # literally named "deadbeef"; accepted tradeoff — use --ref to disambiguate.
+      if [[ $REF =~ ^[0-9a-f]{7,40}$ ]]; then
+        git -c advice.detachedHead=false clone \
+          --filter=blob:none --no-checkout \
+          "https://github.com/$OWNER/$REPO.git" "$tmp/r" >&2
+        ( cd "$tmp/r"
+          [[ -n $SUBPATH ]] && git sparse-checkout set --no-cone "$SUBPATH" >&2
+          git checkout "$REF" >&2
+        )
+      else
+        git clone --filter=blob:none --no-checkout --depth=1 \
+          --branch "$REF" \
+          "https://github.com/$OWNER/$REPO.git" "$tmp/r" >&2
+        ( cd "$tmp/r"
+          [[ -n $SUBPATH ]] && git sparse-checkout set --no-cone "$SUBPATH" >&2
+          git checkout >&2
+        )
+      fi
+      src="$tmp/r${SUBPATH:+/$SUBPATH}"
+      [[ -e $src ]] || _die "path not found in repo: ${SUBPATH:-<root>}"
+      cp -R "$src/." "$OUT/"
+      (( KEEP_GIT )) || rm -rf "$OUT/.git"
+    else
+      # Default path: one streaming tarball fetch — simpler and usually faster than
+      # a partial clone. Downloads the whole repo though; use --sparse for huge repos
+      # where you only need a small subpath.
+      _info "fetching tarball…"
+      curl -fL --progress-bar \
+        "https://codeload.github.com/$OWNER/$REPO/tar.gz/$REF" \
+        | tar -xz -C "$tmp" --strip-components=1 \
+        || _die "tarball fetch/extract failed"
+      src="$tmp${SUBPATH:+/$SUBPATH}"
+      [[ -e $src ]] || _die "path not found in repo: ${SUBPATH:-<root>}"
+      cp -R "$src/." "$OUT/"
+    fi
+    ;;
+esac
+
+_summary
