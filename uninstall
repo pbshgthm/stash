@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# stash — uninstallation script
+#
+# usage:  curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/uninstall | bash
+#         ./uninstall      (when run from a local clone)
+#
+# removes the symlinks in ~/.local/bin/ and the clone at ~/.local/share/stash.
+# per-tool state (configs, daemons) is left intact — run `<tool> teardown`
+# first if you want to fully clean up loco's daemon, etc.
+
+SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/stash"
+BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+
+# --- style ---
+if [[ -t 1 ]]; then
+    B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
+    C=$'\033[36m' W=$'\033[37m' X=$'\033[0m'
+else
+    B= D= G= R= C= W= X=
+fi
+
+_ok()   { printf '%s\n' "${G}ok${X}  ${D}$*${X}"; }
+_err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
+_info() { printf '%s\n' "${D}$*${X}"; }
+_die()  { _err "$*"; exit 1; }
+_yes()  { [[ $1 =~ ^[Yy]([Ee][Ss])?$ ]]; }
+
+# --- banner ---
+printf '%s' "${B}${C}"
+cat <<'BANNER'
+       _____              ______
+_________  /______ __________  /_
+__  ___/  __/  __ `/_  ___/_  __ \
+_(__  )/ /_ / /_/ /_(__  )_  / / /
+/____/ \__/ \__,_/ /____/ /_/ /_/
+BANNER
+printf '%s' "${X}"
+printf '\n  %suninstall%s %s— remove stash from this machine%s\n\n' "$B" "$X" "$D" "$X"
+
+# --- find symlinks pointing into SHARE_DIR ---
+links=()
+if [[ -d $BIN_DIR ]]; then
+    for link in "$BIN_DIR"/*; do
+        [[ -L $link ]] || continue
+        target=$(readlink "$link")
+        case "$target" in
+            "$SHARE_DIR"/*) links+=("$link") ;;
+        esac
+    done
+fi
+
+# --- summary ---
+_info "this will remove:"
+if [[ ${#links[@]} -gt 0 ]]; then
+    for link in "${links[@]}"; do
+        _info "  $link  →  $(readlink "$link")"
+    done
+else
+    _info "  (no stash symlinks found in $BIN_DIR)"
+fi
+[[ -d $SHARE_DIR ]] && _info "  $SHARE_DIR/  (cloned repo)"
+
+printf '\n'
+printf '%snote:%s %sper-tool state (configs, daemons) is left intact%s\n' "$R" "$X" "$D" "$X"
+_info "  if loco's daemon is running, ${B}stop and tear it down first${X}${D}:"
+_info "    loco teardown"
+
+printf '\n'
+read -p "$(printf '%scontinue? [y/N]%s ' "$B" "$X")" -r ans </dev/tty || ans=""
+_yes "$ans" || { _info "aborted"; exit 0; }
+
+# --- remove links ---
+if [[ ${#links[@]} -gt 0 ]]; then
+    for link in "${links[@]}"; do
+        rm -- "$link"
+        _ok "removed link ${B}$(basename "$link")${X}"
+    done
+fi
+
+# --- remove share dir ---
+if [[ -d $SHARE_DIR ]]; then
+    rm -rf "$SHARE_DIR"
+    _ok "removed ${B}$SHARE_DIR${X}"
+fi
+
+printf '\n'
+_ok "${B}stash uninstalled${X}"

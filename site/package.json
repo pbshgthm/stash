@@ -1,0 +1,17 @@
+{
+  "name": "utils-site",
+  "type": "module",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "astro dev --host --port 58749",
+    "build": "astro build",
+    "preview": "astro preview --host --port 58749",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "astro": "^5.5.0",
+    "tailwindcss": "^4.0.0",
+    "@tailwindcss/vite": "^4.0.0"
+  }
+}

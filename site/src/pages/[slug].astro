@@ -1,0 +1,116 @@
+---
+import { render } from "astro:content";
+import Terminal from "../layouts/Terminal.astro";
+import Banner from "../components/Banner.astro";
+import { summarize } from "../lib/parse";
+import { colorOf } from "../lib/colors";
+import { getUtilEntries, getUtilStats } from "../lib/utils";
+
+export async function getStaticPaths() {
+  const entries = await getUtilEntries();
+  return entries.map((entry) => ({
+    params: { slug: entry.id },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content, headings } = await render(entry);
+const { banner, tagline } = summarize(entry.body ?? "");
+const color = colorOf(entry.id);
+
+const sections = headings.filter((h) => h.depth === 2);
+const stats = getUtilStats(entry.id);
+const sourceUrl = `https://github.com/pbshgthm/stash/blob/main/${entry.id}`;
+---
+
+<Terminal title={`${entry.id} — stash`} description={tagline}>
+  <div style={`--util-color: ${color}`}>
+    <!-- breadcrumb -->
+    <a
+      href="/"
+      class="group inline-flex items-baseline gap-2 font-mono text-[11px] text-faint transition-colors hover:text-fg"
+    >
+      <span class="transition-transform group-hover:-translate-x-0.5">←</span>
+      <span>stash</span>
+      <span class="text-line-strong">/</span>
+      <span class="text-muted group-hover:text-fg">{entry.id}</span>
+    </a>
+
+    <!-- hero -->
+    <section class="mt-12">
+      <div class="overflow-x-auto pb-2">
+        <Banner text={banner} size="xl" color={color} />
+      </div>
+
+      <div
+        class="mt-12 grid gap-x-10 gap-y-3 lg:grid-cols-[auto_1fr] lg:items-baseline"
+      >
+        <h1 class="font-mono text-[28px] font-medium tracking-tight text-fg">
+          {entry.id}
+        </h1>
+        <p class="serif text-[22px] leading-[1.35] text-fg-soft">
+          {tagline}
+        </p>
+      </div>
+
+      <div
+        class="mt-7 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 font-mono text-[11px] tabular text-faint"
+      >
+        <div class="flex items-center gap-x-3">
+          <span>bash</span>
+          <span class="text-line-strong">·</span>
+          <span>{stats.lines} lines</span>
+          <span class="text-line-strong">·</span>
+          <span>macOS</span>
+        </div>
+        <a
+          href={sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+          class="group inline-flex items-center gap-1.5 transition-colors hover:text-fg"
+        >
+          <span>view source</span>
+          <span class="transition-transform group-hover:translate-x-0.5">↗</span>
+        </a>
+      </div>
+    </section>
+
+    <!-- separator -->
+    <div class="mt-20 mb-14 h-px bg-line"></div>
+
+    <!-- doc body — TOC sidebar on the LEFT, content on the right -->
+    <div class="grid gap-12 lg:grid-cols-[200px_minmax(0,1fr)] lg:gap-16">
+      {
+        sections.length > 0 ? (
+          <aside class="hidden lg:block">
+            <div class="sticky top-12">
+              <div class="mb-5 font-mono text-[10px] uppercase tracking-[0.2em] text-faint">
+                contents
+              </div>
+              <nav class="border-l border-line">
+                {sections.map((s, i) => (
+                  <a
+                    href={`#${s.slug}`}
+                    class="group -ml-px flex items-baseline gap-3 border-l border-transparent py-1.5 pl-4 text-[13px] text-muted transition-all duration-150 hover:border-fg hover:text-fg"
+                  >
+                    <span class="font-mono text-[10px] tabular text-faint transition-colors group-hover:text-muted">
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span class="lowercase tracking-tight">{s.text}</span>
+                  </a>
+                ))}
+              </nav>
+            </div>
+          </aside>
+        ) : (
+          <div class="hidden lg:block" />
+        )
+      }
+
+      <article class="md md--util min-w-0">
+        <Content />
+      </article>
+    </div>
+  </div>
+</Terminal>

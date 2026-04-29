@@ -1,0 +1,71 @@
+---
+import Banner from "./Banner.astro";
+import { colorOf } from "../lib/colors";
+
+interface Props {
+  slug: string;
+  banner: string;
+  tagline: string;
+  index: number;
+}
+
+const { slug, banner, tagline, index } = Astro.props;
+const color = colorOf(slug);
+const num = String(index + 1).padStart(2, "0");
+---
+
+<a
+  href={`/${slug}`}
+  class="util-card group relative flex flex-col overflow-hidden rounded-md border border-line bg-surface/40 px-7 pt-6 pb-7 transition-all duration-300 hover:border-line-strong hover:bg-surface/70"
+  style={`--util-color: ${color}`}
+>
+  <!-- top accent rule -->
+  <span
+    aria-hidden="true"
+    class="util-rule absolute inset-x-0 top-0 h-px origin-left scale-x-[0.16] transition-transform duration-500 ease-out group-hover:scale-x-100"
+  ></span>
+
+  <!-- header row -->
+  <div class="flex items-center justify-between">
+    <span class="font-mono text-[11px] tabular text-faint">{num}</span>
+    <span class="util-arrow font-mono text-[11px] text-faint transition-all duration-200 group-hover:text-fg">
+      <span class="opacity-60">read</span>
+      <span class="ml-1.5 inline-block translate-x-0 transition-transform duration-200 group-hover:translate-x-1">
+        →
+      </span>
+    </span>
+  </div>
+
+  <!-- banner -->
+  <div class="mt-7 overflow-x-auto pb-1">
+    <Banner text={banner} size="md" color={color} />
+  </div>
+
+  <!-- name -->
+  <h3
+    class="mt-7 font-mono text-[22px] font-medium tracking-tight text-fg"
+  >
+    {slug}
+  </h3>
+
+  <!-- tagline -->
+  <p class="mt-2 max-w-sm text-[14px] leading-relaxed text-muted">
+    {tagline}
+  </p>
+</a>
+
+<style>
+  .util-rule {
+    background: linear-gradient(
+      to right,
+      transparent 0%,
+      var(--util-color) 20%,
+      var(--util-color) 80%,
+      transparent 100%
+    );
+  }
+  .util-card:hover {
+    box-shadow: 0 1px 0 0 color-mix(in oklab, var(--util-color) 35%, transparent)
+      inset;
+  }
+</style>

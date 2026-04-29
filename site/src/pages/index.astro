@@ -1,0 +1,112 @@
+---
+import Terminal from "../layouts/Terminal.astro";
+import Banner from "../components/Banner.astro";
+import UtilCard from "../components/UtilCard.astro";
+import { getUtils } from "../lib/utils";
+import heroBanner from "../assets/stash.txt?raw";
+
+const cards = await getUtils();
+const count = cards.length;
+const countLabel = count.toString().padStart(2, "0");
+---
+
+<Terminal title="stash">
+  <!-- hero -->
+  <section class="relative">
+    <div
+      class="mb-7 flex items-center gap-3 font-mono text-[10px] uppercase tracking-[0.24em] text-faint"
+    >
+      <span class="h-px w-7 bg-line-strong"></span>
+      <span>a personal stash</span>
+    </div>
+
+    <div class="overflow-x-auto pb-2">
+      <Banner text={heroBanner} size="xl" tone="fg" />
+    </div>
+
+    <div
+      class="mt-14 grid gap-y-6 lg:grid-cols-[1fr_auto] lg:items-end lg:gap-x-12"
+    >
+      <p
+        class="serif max-w-xl text-[24px] leading-[1.32] text-fg-soft sm:text-[26px]"
+      >
+        single-file bash tools for macOS — hand-built, hoarded, and kept close.
+      </p>
+      <div
+        class="flex flex-col gap-1.5 font-mono text-[11px] tabular text-faint lg:items-end lg:text-right"
+      >
+        <span>
+          by{" "}
+          <a
+            href="https://github.com/pbshgthm"
+            target="_blank"
+            rel="noreferrer"
+            class="text-muted underline-offset-4 transition-colors hover:text-fg hover:underline"
+          >
+            Poobesh Gowtham
+          </a>
+        </span>
+        <span class="flex items-center gap-2 lg:justify-end">
+          <span>{countLabel} in stash</span>
+          <span class="text-line-strong">·</span>
+          <span>no runtime deps</span>
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <!-- masthead divider -->
+  <div
+    class="mt-24 mb-10 flex items-baseline justify-between border-b border-line pb-3.5 font-mono text-[10px] uppercase tracking-[0.24em] text-faint"
+  >
+    <span>tools</span>
+    <span class="tabular">{countLabel}</span>
+  </div>
+
+  <!-- grid -->
+  <section class="grid grid-cols-1 gap-5 md:grid-cols-2">
+    {
+      cards.map((c, i) => (
+        <UtilCard
+          slug={c.slug}
+          banner={c.banner}
+          tagline={c.tagline}
+          index={i}
+        />
+      ))
+    }
+  </section>
+
+  <!-- principles -->
+  <section
+    class="mt-28 grid grid-cols-1 gap-x-12 gap-y-10 border-t border-line pt-10 md:grid-cols-3"
+  >
+    <div>
+      <div class="font-mono text-[10px] uppercase tracking-[0.24em] text-faint">
+        — 01
+      </div>
+      <h3 class="mt-3 font-mono text-[14px] text-fg">one bash file</h3>
+      <p class="mt-2 text-[13.5px] leading-relaxed text-muted">
+        no python, no node, no build step. hackable on any unix box.
+      </p>
+    </div>
+    <div>
+      <div class="font-mono text-[10px] uppercase tracking-[0.24em] text-faint">
+        — 02
+      </div>
+      <h3 class="mt-3 font-mono text-[14px] text-fg">no orphans</h3>
+      <p class="mt-2 text-[13.5px] leading-relaxed text-muted">
+        every tool installs and removes itself. nothing left behind after teardown.
+      </p>
+    </div>
+    <div>
+      <div class="font-mono text-[10px] uppercase tracking-[0.24em] text-faint">
+        — 03
+      </div>
+      <h3 class="mt-3 font-mono text-[14px] text-fg">short, memorable</h3>
+      <p class="mt-2 text-[13.5px] leading-relaxed text-muted">
+        six characters or less. one lowercase word. pronounceable.
+      </p>
+    </div>
+  </section>
+</Terminal>

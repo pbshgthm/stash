@@ -1,0 +1,80 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const {
+  title,
+  description = "A stash of single-file bash tools for macOS.",
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="author" content="Poobesh Gowtham" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23161616'/%3E%3Ctext x='12' y='17' text-anchor='middle' font-family='monospace' font-size='13' font-weight='700' fill='%237dd3fc'%3E_%3C/text%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap"
+    />
+    <title>{title}</title>
+  </head>
+  <body class="text-fg font-sans">
+    <header class="border-b border-line/60">
+      <div
+        class="mx-auto flex max-w-5xl items-center justify-between px-8 py-5"
+      >
+        <a
+          href="/"
+          class="font-mono text-[14px] font-medium text-fg transition-opacity hover:opacity-70"
+        >
+          stash
+        </a>
+        <a
+          href="https://github.com/pbshgthm"
+          target="_blank"
+          rel="noreferrer"
+          class="font-mono text-[11px] text-faint transition-colors hover:text-fg"
+        >
+          @pbshgthm
+        </a>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-5xl px-8 pt-16 pb-32 sm:pt-20">
+      <slot />
+    </main>
+
+    <footer class="border-t border-line/60">
+      <div
+        class="mx-auto flex max-w-5xl flex-col gap-2 px-8 py-7 font-mono text-[11px] text-faint sm:flex-row sm:items-center sm:justify-between"
+      >
+        <span>
+          stash <span class="text-line-strong">/</span>
+          <span class="text-muted">single-file bash, no runtime deps</span>
+        </span>
+        <span>
+          a personal collection by
+          <a
+            href="https://github.com/pbshgthm"
+            target="_blank"
+            rel="noreferrer"
+            class="text-muted underline-offset-4 transition-colors hover:text-fg hover:underline"
+          >
+            Poobesh Gowtham
+          </a>
+        </span>
+      </div>
+    </footer>
+  </body>
+</html>

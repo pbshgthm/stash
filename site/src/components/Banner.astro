@@ -1,0 +1,38 @@
+---
+interface Props {
+  text: string;
+  size?: "xs" | "sm" | "md" | "lg" | "xl";
+  tone?: "accent" | "fg" | "muted" | "faint";
+  color?: string;
+  class?: string;
+}
+
+const {
+  text,
+  size = "md",
+  tone = "fg",
+  color,
+  class: className = "",
+} = Astro.props;
+
+const sizes = {
+  xs: "text-[9px] sm:text-[10px] leading-[1.05]",
+  sm: "text-[10px] sm:text-[11px] leading-[1.05]",
+  md: "text-[12px] sm:text-[13px] leading-[1.05]",
+  lg: "text-[13px] sm:text-[16px] md:text-[18px] leading-[1.05]",
+  xl: "text-[14px] sm:text-[20px] md:text-[26px] leading-[1.05]",
+};
+
+const tones = {
+  accent: "text-accent",
+  fg: "text-fg",
+  muted: "text-muted",
+  faint: "text-faint",
+};
+
+const toneClass = color ? "" : tones[tone];
+---
+
+<pre
+  class:list={["ascii", sizes[size], toneClass, className]}
+  style={color ? `color: ${color}` : undefined}>{text}</pre>
