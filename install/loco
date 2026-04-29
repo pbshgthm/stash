@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loco — installer
+#
+# usage:
+#   curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/loco | bash
+#   ./install/loco        (when run from a local clone)
+#
+# Drops loco into ~/.local/bin/loco. After install, run `loco init`
+# to set up the Caddy daemon (one-time, idempotent).
+
+TOOL="loco"
+RAW_URL="https://raw.githubusercontent.com/pbshgthm/stash/main/$TOOL"
+BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+
+# --- style ---
+if [[ -t 1 ]]; then
+    B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
+    C=$'\033[36m' X=$'\033[0m'
+else
+    B= D= G= R= C= X=
+fi
+
+_ok()   { printf '%s\n' "${G}ok${X}  ${D}$*${X}"; }
+_err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
+_info() { printf '%s\n' "${D}$*${X}"; }
+_die()  { _err "$*"; exit 1; }
+
+# --- preflight ---
+command -v curl >/dev/null 2>&1 || _die "curl is required but not found in PATH"
+
+# --- download ---
+mkdir -p "$BIN_DIR"
+target="$BIN_DIR/$TOOL"
+tmp="$target.tmp.$$"
+
+# atomic write — clean tmp on any exit
+trap 'rm -f "$tmp"' EXIT
+
+_info "fetching ${B}$TOOL${X}${D} → $target${X}"
+curl -fsSL "$RAW_URL" -o "$tmp"
+chmod +x "$tmp"
+mv -f "$tmp" "$target"
+
+_ok "installed ${B}$TOOL${X}"
+
+# --- PATH check ---
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+        printf '\n'
+        printf '%sheads up:%s %s is not on your PATH\n' "$R" "$X" "$BIN_DIR"
+        _info "  add this to your shell rc (e.g. ~/.zshrc or ~/.bashrc):"
+        printf '\n    %sexport PATH="%s:$PATH"%s\n\n' "$C" "$BIN_DIR" "$X"
+        ;;
+esac
+
+# --- next steps ---
+printf '\n'
+_info "next:"
+_info "  ${B}$TOOL init${X}${D}    — first-time daemon setup (idempotent)${X}"
+_info "  ${B}$TOOL --help${X}${D}  — see what it does${X}"

@@ -21,17 +21,17 @@ Instead of remembering `localhost:5180` / `localhost:42691` / `localhost:4321`, 
 ## Install
 
 ```
-bash /path/to/loco init
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/loco | bash
+loco init
 ```
 
-`init` is idempotent and does everything:
+The first line drops `loco` into `~/.local/bin/`. The second is the one-time daemon setup. `init` is idempotent and does:
 
 - `brew install caddy` if it isn't already.
-- Symlinks the script to `~/.local/bin/loco` so you can call it from anywhere.
 - Creates `~/.config/loco/` and generates an initial `Caddyfile`.
 - Installs `/Library/LaunchDaemons/com.loco.caddy.plist` (requires `sudo`) and boots it. Caddy now auto-starts on every login.
 
-Make sure `~/.local/bin` is on your `PATH`.
+Make sure `~/.local/bin` is on your `PATH` — the installer prints the line to add if it isn't.
 
 ## Commands
 

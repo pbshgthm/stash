@@ -15,14 +15,11 @@ Paste a GitHub URL. Get the contents. `git clone` drags `.git` along, the GitHub
 
 ## Install
 
-Single bash script, no runtime deps beyond `curl`, `tar`, and (for `--sparse`) `git`.
-
 ```
-ln -s /path/to/pluck ~/.local/bin/pluck
-chmod +x /path/to/pluck
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/pluck | bash
 ```
 
-Make sure `~/.local/bin` is on your `PATH`.
+Drops `pluck` into `~/.local/bin/`. Single bash script, no runtime deps beyond `curl`, `tar`, and (for `--sparse`) `git`. Make sure `~/.local/bin` is on your `PATH`.
 
 ## Usage
 

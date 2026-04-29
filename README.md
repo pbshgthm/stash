@@ -12,13 +12,17 @@ a personal stash of single-file bash tools for macOS, by [Poobesh Gowtham](https
 
 ## install
 
+Each tool installs itself with one curl. Pick the ones you want:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash
+# loco — local dev domains
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/loco | bash
+
+# pluck — github file downloader
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/pluck | bash
 ```
 
-Clones the repo to `~/.local/share/stash` and symlinks each tool into `~/.local/bin/<name>`. Re-run any time to pull the latest.
-
-If `~/.local/bin` isn't on your `PATH`, the installer tells you the exact line to drop in your shell rc.
+Each script drops the tool into `~/.local/bin/<name>`. If `~/.local/bin` isn't on your `PATH`, the installer prints the exact line to drop in your shell rc.
 
 ## tools
 
@@ -45,19 +49,19 @@ See [CLAUDE.md](./CLAUDE.md) for the full conventions.
 
 ## uninstall
 
-If a tool has per-tool state (loco's daemon, configs), tear that down first:
+For service tools, tear down their per-tool state first (daemons, configs):
 
 ```bash
 loco teardown
 ```
 
-Then remove the stash itself:
+Then remove the binary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/uninstall | bash
+rm ~/.local/bin/loco
 ```
 
-This removes the `~/.local/bin/<name>` symlinks and the clone at `~/.local/share/stash`. It leaves per-tool state alone so you don't lose a config you wanted to keep — that's what the per-tool `teardown` is for.
+For one-shots like `pluck`, just `rm ~/.local/bin/pluck`.
 
 ## site
 
