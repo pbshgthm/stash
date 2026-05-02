@@ -2,7 +2,8 @@ import { defineConfig } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  site: 'https://utils.local',
+  site: 'https://pbshgthm.github.io',
+  base: '/stash/',
   vite: {
     plugins: [tailwindcss()],
     server: { fs: { allow: ['..'] } },

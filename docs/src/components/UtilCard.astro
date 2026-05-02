@@ -15,7 +15,7 @@ const num = String(index + 1).padStart(2, "0");
 ---
 
 <a
-  href={`/${slug}`}
+  href={`${import.meta.env.BASE_URL}${slug}`}
   class="util-card group relative flex flex-col overflow-hidden rounded-md border border-line bg-surface/40 px-7 pt-6 pb-7 transition-all duration-300 hover:border-line-strong hover:bg-surface/70"
   style={`--util-color: ${color}`}
 >

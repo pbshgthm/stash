@@ -28,7 +28,7 @@ const sourceUrl = `https://github.com/pbshgthm/stash/blob/main/tools/${entry.id}
   <div style={`--util-color: ${color}`}>
     <!-- breadcrumb -->
     <a
-      href="/"
+      href={import.meta.env.BASE_URL}
       class="group inline-flex items-baseline gap-2 font-mono text-[11px] text-faint transition-colors hover:text-fg"
     >
       <span class="transition-transform group-hover:-translate-x-0.5">←</span>
