@@ -8,13 +8,16 @@ import { colorOf } from './colors';
 // utils.ts lives at site/src/lib/ — three `..` reach the repo root.
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
-// Per repo convention every util has a sibling executable file with the same
-// basename. We use that as the source of truth — only `.md` files that have a
-// matching executable next to them are real utils.
+// Per repo convention every tool lives at `tools/<slug>/<slug>` with the
+// executable having the same basename as the folder.
+function toolPath(slug: string): string {
+  return join(REPO_ROOT, 'tools', slug, slug);
+}
+
 function hasExecSibling(slug: string): boolean {
-  const sibling = join(REPO_ROOT, slug);
-  if (!existsSync(sibling)) return false;
-  const s = statSync(sibling);
+  const p = toolPath(slug);
+  if (!existsSync(p)) return false;
+  const s = statSync(p);
   return s.isFile() && (s.mode & 0o111) !== 0;
 }
 
@@ -43,8 +46,7 @@ export async function getUtilEntries() {
 }
 
 export function getUtilStats(slug: string): { lines: number; bytes: number } {
-  const p = join(REPO_ROOT, slug);
-  const content = readFileSync(p, 'utf8');
+  const content = readFileSync(toolPath(slug), 'utf8');
   return {
     lines: content.split('\n').length,
     bytes: Buffer.byteLength(content, 'utf8'),

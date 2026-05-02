@@ -1,0 +1,837 @@
+#!/usr/bin/env bash
+# mint — generate a random favicon (PNG)
+set -euo pipefail
+
+# --- style ---
+# -t 2 (stderr) so colours work even when stdout is piped — this script
+# only writes status to stderr and the PNG to disk.
+if [[ -t 2 ]]; then
+    B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
+    C=$'\033[36m' W=$'\033[37m' X=$'\033[0m'
+else
+    B= D= G= R= C= W= X=
+fi
+
+_ok()   { printf '%s\n' "${G}ok${X}  ${D}$*${X}" >&2; }
+_err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
+_info() { printf '%s\n' "${D}$*${X}" >&2; }
+_die()  { _err "$*"; exit 1; }
+
+# --- usage ---
+usage() {
+  printf '\n'
+  printf '%s%s' "$B" "$C"
+  cat <<'BANNER'
+             _____       _____
+  _______ ______(_)________  /_
+  __  __ `__ \_  /__  __ \  __/
+  _  / / / / /  / _  / / / /_
+  /_/ /_/ /_//_/  /_/ /_/\__/
+BANNER
+  printf '%s\n' "$X"
+  cat <<EOF
+  ${B}mint${X} ${D}— generate a random favicon (PNG)${X}
+
+${C}Usage:${X}
+  mint [destination] [options]
+
+${C}Destination:${X}
+  (omitted)         → ./favicon.png
+  ./parent/         → ./parent/favicon.png  (trailing slash or existing dir = parent)
+  ./icons/my-logo   → ./icons/my-logo.png   (anything else = full output path; .png appended)
+
+${C}Options:${X}
+      --seed <str>     Reproducible seed (default: random)
+      --size <px>      PNG render size in pixels (default: 512)
+      --padding <pct>  Inset the shape, as % of canvas (default: 0)
+      --transparent    Transparent background
+  -f, --force          Overwrite the destination if it already exists
+      --preview        Also write preview.png (6×6 grid) + preview-small.png (16px strip)
+  -h, --help           Show this help
+
+${C}Examples:${X}
+  mint --seed hello                 # → ./favicon.png  (reproducible)
+  mint ~/Desktop                    # → ~/Desktop/favicon.png
+  mint ~/icons/logo                 # → ~/icons/logo.png
+  mint --size 1024 --padding 10     # bigger render, 10% inset
+  mint --transparent                # transparent background
+  mint --preview                    # also writes preview grids alongside
+EOF
+}
+
+# --- args ---
+[[ $# -eq 0 ]] && { usage >&2; exit 1; }
+SEED=""; DEST=""; SIZE=512; PREVIEW=0; PADDING=0; TRANSPARENT=0; FORCE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --seed)        [[ $# -ge 2 ]] || _die "--seed needs a value"; SEED="$2"; shift 2 ;;
+    --size)        [[ $# -ge 2 ]] || _die "--size needs a value"; SIZE="$2"; shift 2 ;;
+    --padding)     [[ $# -ge 2 ]] || _die "--padding needs a value"; PADDING="$2"; shift 2 ;;
+    --transparent) TRANSPARENT=1; shift ;;
+    -f|--force)    FORCE=1; shift ;;
+    --preview)     PREVIEW=1; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    -*)            _die "unknown flag: $1" ;;
+    *)
+      [[ -z "$DEST" ]] || _die "destination given twice: '$DEST' and '$1'"
+      DEST="$1"; shift ;;
+  esac
+done
+
+# --- destination resolution ---
+# Mirrors pluck's semantics: trailing slash or existing dir → drop into parent
+# with default name; anything else → full output path. We always emit .png.
+DEFAULT_NAME="favicon.png"
+if [[ -z "$DEST" ]]; then
+    OUT_PATH="./$DEFAULT_NAME"
+elif [[ "$DEST" == */ || -d "$DEST" ]]; then
+    OUT_PATH="${DEST%/}/$DEFAULT_NAME"
+else
+    if [[ "$DEST" == *.png ]]; then OUT_PATH="$DEST"
+    else                            OUT_PATH="$DEST.png"
+    fi
+fi
+
+if [[ -e "$OUT_PATH" && "$FORCE" -ne 1 ]]; then
+    _die "$OUT_PATH already exists (use -f to overwrite)"
+fi
+
+OUT_DIR=$(dirname "$OUT_PATH")
+mkdir -p "$OUT_DIR"
+
+# --- dependency: rsvg-convert ---
+RSVG=""
+_detect_rsvg() { command -v rsvg-convert >/dev/null 2>&1 && RSVG="rsvg-convert" || RSVG=""; }
+_detect_rsvg
+
+_install_rsvg() {
+  command -v brew >/dev/null 2>&1 || _die "rsvg-convert not found and Homebrew is missing — install librsvg manually"
+  _info "installing librsvg via brew..."
+  brew install librsvg
+  _detect_rsvg
+  [[ -n "$RSVG" ]] || _die "rsvg-convert still not on PATH after install"
+}
+[[ -z "$RSVG" ]] && _install_rsvg
+
+# --- seeded RNG ---
+# bash $RANDOM is 15-bit (0..32767); we seed it once, then derive ranges via awk.
+if [[ -z "$SEED" ]]; then
+    SEED="$(date +%s%N)$$"
+    SEED_INT=$((SEED % 2147483647))
+else
+    SEED_INT=$(printf '%s' "$SEED" | cksum | awk '{print $1}')
+fi
+RANDOM=$SEED_INT
+
+rand()    { awk -v r="$RANDOM" 'BEGIN{printf "%.6f", r/32768}'; }
+randf()   { awk -v r="$RANDOM" -v a="$1" -v b="$2" 'BEGIN{printf "%.4f", a+(b-a)*r/32768}'; }
+randi()   { awk -v r="$RANDOM" -v a="$1" -v b="$2" 'BEGIN{printf "%d", a+int((b-a+1)*r/32768)}'; }
+pick_idx(){ randi 0 $(($1 - 1)); }
+chance()  { awk -v r=$(rand) -v p="$1" 'BEGIN{print (r<p)?1:0}'; }
+UID_COUNTER=0
+new_id()  { UID_COUNTER=$((UID_COUNTER + 1)); printf "id%d_%d" "$$" "$UID_COUNTER"; }
+
+# --- WCAG contrast ---
+contrast_ratio() {
+  awk -v c1="$1" -v c2="$2" 'BEGIN{
+    for (k = 1; k <= 2; k++) {
+      hex = (k == 1) ? c1 : c2
+      hexchars = "0123456789abcdef"
+      rb1 = index(hexchars, tolower(substr(hex,2,1))) - 1
+      rb2 = index(hexchars, tolower(substr(hex,3,1))) - 1
+      gb1 = index(hexchars, tolower(substr(hex,4,1))) - 1
+      gb2 = index(hexchars, tolower(substr(hex,5,1))) - 1
+      bb1 = index(hexchars, tolower(substr(hex,6,1))) - 1
+      bb2 = index(hexchars, tolower(substr(hex,7,1))) - 1
+      r = (rb1*16 + rb2) / 255; g = (gb1*16 + gb2) / 255; b = (bb1*16 + bb2) / 255
+      r = (r <= 0.03928) ? r/12.92 : ( ((r+0.055)/1.055) ^ 2.4 )
+      g = (g <= 0.03928) ? g/12.92 : ( ((g+0.055)/1.055) ^ 2.4 )
+      b = (b <= 0.03928) ? b/12.92 : ( ((b+0.055)/1.055) ^ 2.4 )
+      lum = 0.2126*r + 0.7152*g + 0.0722*b
+      if (k == 1) l1 = lum; else l2 = lum
+    }
+    if (l1 < l2) { t = l1; l1 = l2; l2 = t }
+    printf "%.3f", (l1 + 0.05) / (l2 + 0.05)
+  }'
+}
+has_contrast() { awk -v r="$(contrast_ratio "$1" "$2")" -v t="$3" 'BEGIN{print (r>=t)?1:0}'; }
+
+# --- color pools ---
+INKS=(
+  "#f97316" "#ea580c" "#ef4444" "#dc2626" "#e11d48" "#db2777" "#ec4899" "#fb7185"
+  "#f59e0b" "#eab308" "#facc15" "#fbbf24"
+  "#0891b2" "#06b6d4" "#0284c7" "#2563eb" "#1d4ed8" "#1e40af" "#3b82f6"
+  "#14b8a6" "#10b981" "#16a34a" "#15803d" "#22c55e" "#84cc16"
+  "#7c3aed" "#6d28d9" "#a21caf" "#9333ea" "#c026d3"
+  "#00ff88" "#00ffff" "#ff0080" "#ff6ec7" "#f0abfc"
+  "#fafafa" "#171717" "#0a0a0a"
+)
+
+# 3-color palettes: bg + primary + secondary.
+PALETTES_3=(
+  "#fef3c7 #f97316 #db2777"
+  "#fff7ed #ea580c #0891b2"
+  "#fef2f2 #ef4444 #fbbf24"
+  "#fffbeb #f59e0b #ec4899"
+  "#ffe4e6 #e11d48 #1e40af"
+  "#fef3c7 #f43f5e #0ea5e9"
+  "#ecfeff #0891b2 #f43f5e"
+  "#f0fdfa #14b8a6 #f97316"
+  "#dbeafe #2563eb #fb7185"
+  "#dcfce7 #16a34a #db2777"
+  "#f5f3ff #7c3aed #fbbf24"
+  "#fae8ff #a21caf #14b8a6"
+  "#0f172a #fde047 #f97316"
+  "#0f172a #22d3ee #ec4899"
+  "#0c0a09 #f43f5e #fde047"
+  "#1e1b4b #fde047 #ec4899"
+  "#082f49 #fde047 #06b6d4"
+  "#3b0764 #fde68a #ec4899"
+  "#dc2626 #fef3c7 #1e3a8a"
+  "#1e3a8a #fde047 #f97316"
+  "#16a34a #fef3c7 #db2777"
+  "#7c3aed #fde047 #06b6d4"
+  "#000000 #00ff88 #ff0080"
+  "#0a0a0a #ff6ec7 #00ffff"
+  "#000000 #fde047 #f0abfc"
+  "#171717 #fafafa #ef4444"
+  "#fafafa #171717 #2563eb"
+  "#1c1917 #fafaf9 #f59e0b"
+  "#000000 #ffffff #facc15"
+  "#ffffff #000000 #ec4899"
+)
+
+pick_ink_with_contrast() {
+  local _var="$1" _bg="$2" _min="$3"
+  local attempts=0
+  while (( attempts < 40 )); do
+    local cand="${INKS[$(pick_idx ${#INKS[@]})]}"
+    local ok; ok=$(has_contrast "$_bg" "$cand" "$_min")
+    if [[ "$ok" -eq 1 ]]; then
+      printf -v "$_var" '%s' "$cand"; return
+    fi
+    attempts=$((attempts+1))
+  done
+  if [[ "$_bg" == "#000000" || "$_bg" == "#0a0a0a" ]]; then printf -v "$_var" '%s' "#fde047"
+  else printf -v "$_var" '%s' "#dc2626"; fi
+}
+
+pick_ink_safe_for_transparent() {
+  local _var="$1"
+  local attempts=0
+  while (( attempts < 40 )); do
+    local cand="${INKS[$(pick_idx ${#INKS[@]})]}"
+    local cw cb
+    cw=$(has_contrast "$cand" "#ffffff" 2.5)
+    cb=$(has_contrast "$cand" "#000000" 2.5)
+    if [[ "$cw" -eq 1 && "$cb" -eq 1 ]]; then
+      printf -v "$_var" '%s' "$cand"; return
+    fi
+    attempts=$((attempts+1))
+  done
+  printf -v "$_var" '%s' "#dc2626"
+}
+
+# Sets globals BG, INK1, INK2, NUM_INKS based on a weighted random mode.
+pick_colors() {
+  local mode
+  if [[ "$TRANSPARENT" -eq 1 ]]; then
+    mode="transparent_2"
+  else
+    local roll; roll=$(rand)
+    if   awk -v r="$roll" 'BEGIN{exit !(r<0.30)}'; then mode="mono"
+    elif awk -v r="$roll" 'BEGIN{exit !(r<0.65)}'; then mode="duo"
+    else mode="palette"
+    fi
+  fi
+
+  case "$mode" in
+    transparent_2)
+      pick_ink_safe_for_transparent INK1
+      if [[ $(chance 0.5) -eq 1 ]]; then
+        pick_ink_safe_for_transparent INK2
+        local tries=0
+        while [[ "$INK2" == "$INK1" ]] && (( tries < 10 )); do
+          pick_ink_safe_for_transparent INK2; tries=$((tries+1))
+        done
+        NUM_INKS=2
+      else
+        INK2="$INK1"; NUM_INKS=1
+      fi
+      BG="transparent"
+      ;;
+    mono)
+      local bgs=("#ffffff" "#000000" "#fef3c7" "#fafafa" "#0a0a0a")
+      BG="${bgs[$(pick_idx ${#bgs[@]})]}"
+      pick_ink_with_contrast INK1 "$BG" 4.5
+      INK2="$INK1"; NUM_INKS=1
+      ;;
+    duo)
+      local bgs=("#ffffff" "#000000" "#fafafa" "#0a0a0a" "#fef3c7")
+      BG="${bgs[$(pick_idx ${#bgs[@]})]}"
+      pick_ink_with_contrast INK1 "$BG" 4.5
+      pick_ink_with_contrast INK2 "$BG" 3.0
+      local tries=0
+      while [[ "$INK1" == "$INK2" ]] && (( tries < 10 )); do
+        pick_ink_with_contrast INK2 "$BG" 3.0; tries=$((tries+1))
+      done
+      NUM_INKS=2
+      ;;
+    palette)
+      local pal="${PALETTES_3[$(pick_idx ${#PALETTES_3[@]})]}"
+      read -r BG INK1 INK2 <<<"$pal"
+      NUM_INKS=2
+      ;;
+  esac
+}
+
+# --- shape primitives ---
+# Each: prim_<name> CX CY R COLOR — emits SVG centred at (CX,CY), bounded by radius R.
+# Religious-coded shapes (crescent, big cross, 6-pt star) deliberately omitted.
+
+prim_circle() { printf '<circle cx="%s" cy="%s" r="%s" fill="%s"/>' "$1" "$2" "$3" "$4"; }
+
+prim_ring() {
+  local sw; sw=$(awk -v r="$3" 'BEGIN{printf "%.2f", r*0.32}')
+  local r2; r2=$(awk -v r="$3" -v s="$sw" 'BEGIN{printf "%.2f", r-s/2}')
+  printf '<circle cx="%s" cy="%s" r="%s" fill="none" stroke="%s" stroke-width="%s"/>' "$1" "$2" "$r2" "$4" "$sw"
+}
+
+prim_square() {
+  local x y s
+  x=$(awk -v c="$1" -v r="$3" 'BEGIN{printf "%.2f", c-r}')
+  y=$(awk -v c="$2" -v r="$3" 'BEGIN{printf "%.2f", c-r}')
+  s=$(awk -v r="$3" 'BEGIN{printf "%.2f", r*2}')
+  printf '<rect x="%s" y="%s" width="%s" height="%s" fill="%s"/>' "$x" "$y" "$s" "$s" "$4"
+}
+
+prim_rounded() {
+  local x y s rx
+  x=$(awk -v c="$1" -v r="$3" 'BEGIN{printf "%.2f", c-r}')
+  y=$(awk -v c="$2" -v r="$3" 'BEGIN{printf "%.2f", c-r}')
+  s=$(awk -v r="$3" 'BEGIN{printf "%.2f", r*2}')
+  rx=$(awk -v r="$3" 'BEGIN{printf "%.2f", r*0.3}')
+  printf '<rect x="%s" y="%s" width="%s" height="%s" rx="%s" ry="%s" fill="%s"/>' "$x" "$y" "$s" "$s" "$rx" "$rx" "$4"
+}
+
+prim_diamond() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    printf "<polygon points=\"%.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f\" fill=\"%s\"/>",
+      cx, cy-r, cx+r, cy, cx, cy+r, cx-r, cy, col
+  }'
+}
+
+prim_triangle() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    pi=3.14159265
+    printf "<polygon points=\""
+    for (i=0; i<3; i++) { a = i*2*pi/3 - pi/2; printf "%.2f,%.2f ", cx+r*cos(a), cy+r*sin(a) }
+    printf "\" fill=\"%s\"/>", col
+  }'
+}
+
+prim_hexagon() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    pi=3.14159265
+    printf "<polygon points=\""
+    for (i=0; i<6; i++) { a = i*pi/3; printf "%.2f,%.2f ", cx+r*cos(a), cy+r*sin(a) }
+    printf "\" fill=\"%s\"/>", col
+  }'
+}
+
+prim_octagon() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    pi=3.14159265
+    printf "<polygon points=\""
+    for (i=0; i<8; i++) { a = i*pi/4 + pi/8; printf "%.2f,%.2f ", cx+r*cos(a), cy+r*sin(a) }
+    printf "\" fill=\"%s\"/>", col
+  }'
+}
+
+prim_star4() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    pi=3.14159265; ri=r*0.35
+    printf "<polygon points=\""
+    for (i=0; i<8; i++) { a = i*pi/4 - pi/2; rr = (i%2==0) ? r : ri; printf "%.2f,%.2f ", cx+rr*cos(a), cy+rr*sin(a) }
+    printf "\" fill=\"%s\"/>", col
+  }'
+}
+
+prim_star5() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    pi=3.14159265; ri=r*0.42
+    printf "<polygon points=\""
+    for (i=0; i<10; i++) { a = i*pi/5 - pi/2; rr = (i%2==0) ? r : ri; printf "%.2f,%.2f ", cx+rr*cos(a), cy+rr*sin(a) }
+    printf "\" fill=\"%s\"/>", col
+  }'
+}
+
+# 8-point only — 6-point would read as Star of David.
+prim_star8() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    pi=3.14159265; ri=r*0.55
+    printf "<polygon points=\""
+    for (i=0; i<16; i++) { a = i*pi/8 - pi/2; rr = (i%2==0) ? r : ri; printf "%.2f,%.2f ", cx+rr*cos(a), cy+rr*sin(a) }
+    printf "\" fill=\"%s\"/>", col
+  }'
+}
+
+prim_droplet() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    top_y=cy-r; bot_y=cy+r*0.85; side=r*0.85
+    printf "<path d=\"M %.2f %.2f C %.2f %.2f %.2f %.2f %.2f %.2f C %.2f %.2f %.2f %.2f %.2f %.2f Z\" fill=\"%s\"/>",
+      cx, top_y, cx-side, cy+r*0.4, cx-side, cy+r*0.85, cx, bot_y,
+      cx+side, cy+r*0.85, cx+side, cy+r*0.4, cx, top_y, col
+  }'
+}
+
+prim_heart() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    bot_y=cy+r*0.85; top_y=cy-r*0.55; side=r*0.95
+    printf "<path d=\"M %.2f %.2f C %.2f %.2f %.2f %.2f %.2f %.2f C %.2f %.2f %.2f %.2f %.2f %.2f Z\" fill=\"%s\"/>",
+      cx, bot_y,
+      cx-side, cy+r*0.2, cx-side, cy-r*0.65, cx-r*0.05, top_y,
+      cx+r*0.55, cy-r*0.85, cx+side, cy-r*0.4, cx, bot_y, col
+  }'
+}
+
+prim_lightning() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    printf "<path d=\"M %.2f %.2f L %.2f %.2f L %.2f %.2f L %.2f %.2f L %.2f %.2f L %.2f %.2f Z\" fill=\"%s\"/>",
+      cx+r*0.15, cy-r*0.85,
+      cx-r*0.55, cy+r*0.05,
+      cx-r*0.05, cy+r*0.05,
+      cx-r*0.30, cy+r*0.85,
+      cx+r*0.55, cy-r*0.10,
+      cx+r*0.10, cy-r*0.10, col
+  }'
+}
+
+prim_chevron() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    printf "<polygon points=\"%.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f\" fill=\"%s\"/>",
+      cx-r*0.7, cy-r*0.7, cx, cy-r*0.7, cx+r*0.7, cy,
+      cx, cy+r*0.7, cx-r*0.7, cy+r*0.7, cx, cy, col
+  }'
+}
+
+prim_capsule() {
+  local x y w h ry
+  x=$(awk -v c="$1" -v r="$3" 'BEGIN{printf "%.2f", c-r}')
+  y=$(awk -v c="$2" -v r="$3" 'BEGIN{printf "%.2f", c-r*0.5}')
+  w=$(awk -v r="$3" 'BEGIN{printf "%.2f", r*2}')
+  h=$(awk -v r="$3" 'BEGIN{printf "%.2f", r}')
+  ry=$(awk -v r="$3" 'BEGIN{printf "%.2f", r*0.5}')
+  printf '<rect x="%s" y="%s" width="%s" height="%s" rx="%s" ry="%s" fill="%s"/>' "$x" "$y" "$w" "$h" "$ry" "$ry" "$4"
+}
+
+prim_plus() {
+  awk -v cx="$1" -v cy="$2" -v r="$3" -v col="$4" 'BEGIN{
+    t = r*0.36
+    printf "<rect x=\"%.2f\" y=\"%.2f\" width=\"%.2f\" height=\"%.2f\" fill=\"%s\"/>",
+      cx-t, cy-r, t*2, r*2, col
+    printf "<rect x=\"%.2f\" y=\"%.2f\" width=\"%.2f\" height=\"%.2f\" fill=\"%s\"/>",
+      cx-r, cy-t, r*2, t*2, col
+  }'
+}
+
+PRIMITIVES=(circle ring square rounded diamond triangle hexagon octagon star4 star5 star8 droplet heart lightning chevron capsule plus)
+
+# --- single-shape big style ---
+big_single() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local color="$INK1"
+  [[ "$NUM_INKS" -ge 2 && $(chance 0.4) -eq 1 ]] && color="$INK2"
+  local r; r=$(randf 36 42)
+  "prim_$prim" 50 50 "$r" "$color"
+}
+
+# --- repetition layouts ---
+layout_pair_h() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=22 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  "prim_$prim" 28 50 "$r" "$c1"
+  "prim_$prim" 72 50 "$r" "$c2"
+}
+
+layout_pair_v() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=22 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  "prim_$prim" 50 28 "$r" "$c1"
+  "prim_$prim" 50 72 "$r" "$c2"
+}
+
+layout_triad() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=18 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  local inv; inv=$(randi 0 1)
+  if [[ "$inv" -eq 0 ]]; then
+    "prim_$prim" 30 30 "$r" "$c1"
+    "prim_$prim" 70 30 "$r" "$c1"
+    "prim_$prim" 50 70 "$r" "$c2"
+  else
+    "prim_$prim" 50 30 "$r" "$c2"
+    "prim_$prim" 30 70 "$r" "$c1"
+    "prim_$prim" 70 70 "$r" "$c1"
+  fi
+}
+
+layout_grid_2x2() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=18 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  "prim_$prim" 28 28 "$r" "$c1"
+  "prim_$prim" 72 28 "$r" "$c2"
+  "prim_$prim" 28 72 "$r" "$c2"
+  "prim_$prim" 72 72 "$r" "$c1"
+}
+
+layout_grid_3x3() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=12 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  local positions_x=(20 50 80)
+  local positions_y=(20 50 80)
+  local i=0 x y
+  for y in "${positions_y[@]}"; do
+    for x in "${positions_x[@]}"; do
+      local color="$c1"
+      [[ $((i % 2)) -eq 1 ]] && color="$c2"
+      "prim_$prim" "$x" "$y" "$r" "$color"
+      i=$((i+1))
+    done
+  done
+}
+
+layout_stack_v() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=14 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  "prim_$prim" 50 22 "$r" "$c1"
+  "prim_$prim" 50 50 "$r" "$c2"
+  "prim_$prim" 50 78 "$r" "$c1"
+}
+
+layout_stack_h() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=14 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  "prim_$prim" 22 50 "$r" "$c1"
+  "prim_$prim" 50 50 "$r" "$c2"
+  "prim_$prim" 78 50 "$r" "$c1"
+}
+
+layout_diagonal() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=14 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  local dir; dir=$(randi 0 1)
+  if [[ "$dir" -eq 0 ]]; then
+    "prim_$prim" 22 22 "$r" "$c1"
+    "prim_$prim" 50 50 "$r" "$c2"
+    "prim_$prim" 78 78 "$r" "$c1"
+  else
+    "prim_$prim" 78 22 "$r" "$c1"
+    "prim_$prim" 50 50 "$r" "$c2"
+    "prim_$prim" 22 78 "$r" "$c1"
+  fi
+}
+
+layout_rotated_4() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local r=15 c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  "prim_$prim" 50 22 "$r" "$c1"
+  "prim_$prim" 78 50 "$r" "$c2"
+  "prim_$prim" 50 78 "$r" "$c1"
+  "prim_$prim" 22 50 "$r" "$c2"
+}
+
+layout_big_plus_smalls() {
+  local prim="${PRIMITIVES[$(pick_idx ${#PRIMITIVES[@]})]}"
+  local c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  "prim_$prim" 50 50 28 "$c1"
+  local rs=8
+  "prim_$prim" 18 18 "$rs" "$c2"
+  "prim_$prim" 82 18 "$rs" "$c2"
+  "prim_$prim" 18 82 "$rs" "$c2"
+  "prim_$prim" 82 82 "$rs" "$c2"
+}
+
+# --- compositional / masking styles ---
+style_diagonal_split() {
+  local dir; dir=$(randi 0 1)
+  if [[ "$NUM_INKS" -ge 2 ]]; then
+    if [[ "$dir" -eq 0 ]]; then
+      printf '<polygon points="0,0 100,0 0,100" fill="%s"/>' "$INK1"
+      printf '<polygon points="100,0 100,100 0,100" fill="%s"/>' "$INK2"
+    else
+      printf '<polygon points="0,0 100,0 100,100" fill="%s"/>' "$INK1"
+      printf '<polygon points="0,0 0,100 100,100" fill="%s"/>' "$INK2"
+    fi
+  else
+    if [[ "$dir" -eq 0 ]]; then
+      printf '<polygon points="0,0 100,0 0,100" fill="%s"/>' "$INK1"
+    else
+      printf '<polygon points="0,0 100,0 100,100" fill="%s"/>' "$INK1"
+    fi
+  fi
+}
+
+style_two_arcs() {
+  if [[ "$NUM_INKS" -ge 2 ]]; then
+    local id; id=$(new_id)
+    printf '<defs><clipPath id="%s"><circle cx="50" cy="50" r="40"/></clipPath></defs>' "$id"
+    printf '<g clip-path="url(#%s)">' "$id"
+    printf '<rect x="0" y="0" width="50" height="100" fill="%s"/>' "$INK1"
+    printf '<rect x="50" y="0" width="50" height="100" fill="%s"/>' "$INK2"
+    printf '</g>'
+  else
+    printf '<path d="M 50 10 A 40 40 0 0 1 50 90 Z" fill="%s"/>' "$INK1"
+  fi
+}
+
+style_quadrants() {
+  if [[ "$NUM_INKS" -ge 2 ]]; then
+    local colors=("$BG" "$INK1" "$INK2" "$INK1")
+    local i j tmp
+    for ((i=3; i>0; i--)); do j=$(randi 0 $i); tmp="${colors[$i]}"; colors[$i]="${colors[$j]}"; colors[$j]="$tmp"; done
+    printf '<rect x="0" y="0" width="50" height="50" fill="%s"/>' "${colors[0]}"
+    printf '<rect x="50" y="0" width="50" height="50" fill="%s"/>' "${colors[1]}"
+    printf '<rect x="0" y="50" width="50" height="50" fill="%s"/>' "${colors[2]}"
+    printf '<rect x="50" y="50" width="50" height="50" fill="%s"/>' "${colors[3]}"
+  else
+    printf '<rect x="0" y="0" width="50" height="50" fill="%s"/>' "$INK1"
+    printf '<rect x="50" y="50" width="50" height="50" fill="%s"/>' "$INK1"
+  fi
+}
+
+style_ring_with_dot() {
+  local sw; sw=$(randf 12 18)
+  printf '<circle cx="50" cy="50" r="36" fill="none" stroke="%s" stroke-width="%s"/>' "$INK1" "$sw"
+  local dot_color="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && dot_color="$INK2"
+  printf '<circle cx="50" cy="50" r="14" fill="%s"/>' "$dot_color"
+}
+
+style_stacked_circles() {
+  printf '<circle cx="50" cy="50" r="40" fill="%s"/>' "$INK1"
+  local inner_color="$BG"
+  [[ "$NUM_INKS" -ge 2 ]] && inner_color="$INK2"
+  printf '<circle cx="50" cy="50" r="20" fill="%s"/>' "$inner_color"
+}
+
+style_square_with_circle_cut() {
+  local id; id=$(new_id)
+  local cx; cx=$(randf 35 65)
+  local cy; cy=$(randf 35 65)
+  local r;  r=$(randf 18 26)
+  printf '<defs><mask id="%s"><rect width="100" height="100" fill="white"/><circle cx="%s" cy="%s" r="%s" fill="black"/></mask></defs>' \
+    "$id" "$cx" "$cy" "$r"
+  printf '<rect x="14" y="14" width="72" height="72" rx="6" fill="%s" mask="url(#%s)"/>' "$INK1" "$id"
+  if [[ "$NUM_INKS" -ge 2 ]]; then
+    local r2; r2=$(awk -v r="$r" 'BEGIN{printf "%.2f", r*0.55}')
+    printf '<circle cx="%s" cy="%s" r="%s" fill="%s"/>' "$cx" "$cy" "$r2" "$INK2"
+  fi
+}
+
+style_circle_with_square_cut() {
+  local id; id=$(new_id)
+  local s;  s=$(randf 28 38)
+  local cx=50 cy=50
+  local x; x=$(awk -v c="$cx" -v s="$s" 'BEGIN{printf "%.2f", c-s/2}')
+  local y; y=$(awk -v c="$cy" -v s="$s" 'BEGIN{printf "%.2f", c-s/2}')
+  printf '<defs><mask id="%s"><rect width="100" height="100" fill="white"/><rect x="%s" y="%s" width="%s" height="%s" fill="black"/></mask></defs>' \
+    "$id" "$x" "$y" "$s" "$s"
+  printf '<circle cx="50" cy="50" r="40" fill="%s" mask="url(#%s)"/>' "$INK1" "$id"
+  if [[ "$NUM_INKS" -ge 2 ]]; then
+    local s2; s2=$(awk -v s="$s" 'BEGIN{printf "%.2f", s*0.5}')
+    local x2; x2=$(awk -v c="$cx" -v s="$s2" 'BEGIN{printf "%.2f", c-s/2}')
+    local y2; y2=$(awk -v c="$cy" -v s="$s2" 'BEGIN{printf "%.2f", c-s/2}')
+    printf '<rect x="%s" y="%s" width="%s" height="%s" fill="%s"/>' "$x2" "$y2" "$s2" "$s2" "$INK2"
+  fi
+}
+
+style_plus_in_circle() {
+  local id; id=$(new_id)
+  local t=14
+  local t2; t2=$(awk -v t="$t" 'BEGIN{printf "%.2f", 50-t/2}')
+  printf '<defs><mask id="%s">' "$id"
+  printf '<rect width="100" height="100" fill="white"/>'
+  printf '<rect x="%s" y="22" width="%s" height="56" fill="black"/>' "$t2" "$t"
+  printf '<rect x="22" y="%s" width="56" height="%s" fill="black"/>' "$t2" "$t"
+  printf '</mask></defs>'
+  printf '<circle cx="50" cy="50" r="40" fill="%s" mask="url(#%s)"/>' "$INK1" "$id"
+}
+
+style_intersect_lens() {
+  local id; id=$(new_id)
+  local horiz; horiz=$(randi 0 1)
+  local cx1 cy1 cx2 cy2
+  if [[ "$horiz" -eq 1 ]]; then cx1=30; cy1=50; cx2=70; cy2=50
+  else cx1=50; cy1=30; cx2=50; cy2=70; fi
+  printf '<defs><clipPath id="%s"><circle cx="%s" cy="%s" r="36"/></clipPath></defs>' "$id" "$cx1" "$cy1"
+  printf '<circle cx="%s" cy="%s" r="36" fill="%s"/>' "$cx1" "$cy1" "$INK1"
+  local c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  printf '<circle cx="%s" cy="%s" r="36" fill="%s"/>' "$cx2" "$cy2" "$c2"
+  if [[ "$TRANSPARENT" -eq 0 ]]; then
+    printf '<g clip-path="url(#%s)"><circle cx="%s" cy="%s" r="36" fill="%s"/></g>' "$id" "$cx2" "$cy2" "$BG"
+  fi
+}
+
+style_sunburst() {
+  local n=8; [[ $(chance 0.5) -eq 1 ]] && n=12
+  local rot; rot=$(randi 0 45)
+  local c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  printf '<g transform="rotate(%d 50 50)">' "$rot"
+  awk -v n="$n" -v c1="$c1" -v c2="$c2" 'BEGIN{
+    pi=3.14159265
+    for (i=0; i<n; i++) {
+      a1 = i * 2*pi/n; a2 = (i+1) * 2*pi/n
+      x1 = 50 + 45*cos(a1); y1 = 50 + 45*sin(a1)
+      x2 = 50 + 45*cos(a2); y2 = 50 + 45*sin(a2)
+      col = (i % 2 == 0) ? c1 : c2
+      printf "<path d=\"M 50 50 L %.3f %.3f A 45 45 0 0 1 %.3f %.3f Z\" fill=\"%s\"/>", x1, y1, x2, y2, col
+    }
+  }'
+  printf '</g>'
+  if [[ "$TRANSPARENT" -eq 0 ]]; then
+    printf '<circle cx="50" cy="50" r="14" fill="%s"/>' "$BG"
+  fi
+}
+
+style_pie_slice() {
+  local r=40
+  local sweep_deg; sweep_deg=$(randi 200 320)
+  local start_deg; start_deg=$(randi 0 359)
+  local color="$INK1"
+  read -r x1 y1 x2 y2 large < <(awk -v sd="$start_deg" -v swd="$sweep_deg" -v r="$r" 'BEGIN{
+    pi=3.14159265; s = sd*pi/180; sw = swd*pi/180
+    large = (swd > 180) ? 1 : 0
+    printf "%.3f %.3f %.3f %.3f %d", 50+r*cos(s), 50+r*sin(s), 50+r*cos(s+sw), 50+r*sin(s+sw), large
+  }')
+  printf '<path d="M 50 50 L %s %s A %d %d 0 %d 1 %s %s Z" fill="%s"/>' \
+    "$x1" "$y1" "$r" "$r" "$large" "$x2" "$y2" "$color"
+}
+
+style_bars() {
+  local angle=0
+  [[ $(chance 0.5) -eq 1 ]] && angle=90
+  [[ $(chance 0.3) -eq 1 ]] && angle=$((angle + 45))
+  local thickness; thickness=$(randf 24 30)
+  local gap;       gap=$(randf 14 20)
+  local c1="$INK1" c2="$INK1"
+  [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
+  printf '<g transform="rotate(%s 50 50)">' "$angle"
+  local total; total=$(awk -v t="$thickness" -v g="$gap" 'BEGIN{printf "%.2f", 2*t + g}')
+  local start; start=$(awk -v t="$total" 'BEGIN{printf "%.2f", 50-t/2}')
+  local y2;    y2=$(awk -v s="$start" -v t="$thickness" -v g="$gap" 'BEGIN{printf "%.2f", s+t+g}')
+  printf '<rect x="-20" y="%s" width="140" height="%s" fill="%s"/>' "$start" "$thickness" "$c1"
+  printf '<rect x="-20" y="%s" width="140" height="%s" fill="%s"/>' "$y2" "$thickness" "$c2"
+  printf '</g>'
+}
+
+style_arch() {
+  printf '<path d="M 18 85 L 18 50 A 32 32 0 0 1 82 50 L 82 85 Z" fill="%s"/>' "$INK1"
+}
+
+style_half_disc() {
+  local dir; dir=$(randi 0 3)
+  local d
+  case $dir in
+    0) d="M 12 50 A 38 38 0 1 1 88 50 Z" ;;
+    1) d="M 12 50 A 38 38 0 1 0 88 50 Z" ;;
+    2) d="M 50 12 A 38 38 0 1 1 50 88 Z" ;;
+    3) d="M 50 12 A 38 38 0 1 0 50 88 Z" ;;
+  esac
+  printf '<path d="%s" fill="%s"/>' "$d" "$INK1"
+}
+
+# big_single is weighted higher — single shapes read better as favicons.
+ALL_STYLES=(
+  big_single big_single big_single big_single
+  layout_pair_h layout_pair_v layout_triad
+  layout_grid_2x2 layout_grid_3x3
+  layout_stack_v layout_stack_h
+  layout_diagonal layout_rotated_4 layout_big_plus_smalls
+  style_diagonal_split style_two_arcs style_quadrants
+  style_ring_with_dot style_stacked_circles
+  style_square_with_circle_cut style_circle_with_square_cut
+  style_plus_in_circle style_intersect_lens style_sunburst
+  style_pie_slice style_bars style_arch style_half_disc
+)
+
+# --- compose ---
+make_svg() {
+  pick_colors
+  local style="${ALL_STYLES[$(pick_idx ${#ALL_STYLES[@]})]}"
+  local inner; inner=$("$style")
+
+  local bg_rect=""
+  if [[ "$TRANSPARENT" -eq 0 && "$BG" != "transparent" ]]; then
+    bg_rect="<rect width=\"100\" height=\"100\" fill=\"$BG\"/>"
+  fi
+
+  local content="$inner"
+  if [[ "$PADDING" -gt 0 ]]; then
+    local pad="$PADDING"
+    local inner_size; inner_size=$(awk -v p="$pad" 'BEGIN{printf "%.4f", (100-2*p)/100}')
+    content="<g transform=\"translate($pad $pad) scale($inner_size)\">$inner</g>"
+  fi
+
+  printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">%s%s</svg>' "$bg_rect" "$content"
+}
+
+# --- render ---
+TMPDIR_MINT=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_MINT"' EXIT
+
+SVG_TMP="$TMPDIR_MINT/out.svg"
+make_svg > "$SVG_TMP"
+rsvg-convert -w "$SIZE" -h "$SIZE" "$SVG_TMP" -o "$OUT_PATH"
+
+_ok "${B}${OUT_PATH}${X}  ${D}seed:${X} ${W}$SEED${X}"
+
+# --- preview ---
+if [[ "$PREVIEW" -eq 1 ]]; then
+  PREVIEW_GRID="$OUT_DIR/preview.png"
+  PREVIEW_STRIP="$OUT_DIR/preview-small.png"
+
+  {
+    echo '<svg xmlns="http://www.w3.org/2000/svg" width="768" height="768" viewBox="0 0 768 768"><rect width="768" height="768" fill="#e5e5e5"/>'
+    for i in $(seq -w 0 35); do
+      idx=$((10#$i)); col=$((idx % 6)); row=$((idx / 6))
+      x=$((col * 128)); y=$((row * 128))
+      tile=$(make_svg)
+      inner=$(echo "$tile" | sed 's|<svg[^>]*>||; s|</svg>||')
+      echo "<svg x=\"$x\" y=\"$y\" width=\"128\" height=\"128\" viewBox=\"0 0 100 100\">$inner</svg>"
+    done
+    echo '</svg>'
+  } > "$TMPDIR_MINT/grid.svg"
+  rsvg-convert -w 768 -h 768 "$TMPDIR_MINT/grid.svg" -o "$PREVIEW_GRID"
+
+  for i in $(seq 0 9); do
+    tile=$(make_svg)
+    echo "$tile" > "$TMPDIR_MINT/sm_$i.svg"
+    rsvg-convert -w 16 -h 16 "$TMPDIR_MINT/sm_$i.svg" -o "$TMPDIR_MINT/sm_${i}_16.png"
+  done
+  {
+    echo '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="128" viewBox="0 0 1280 128" style="image-rendering: pixelated"><rect width="1280" height="128" fill="#e5e5e5"/>'
+    for i in $(seq 0 9); do
+      x=$((i * 128))
+      b64=$(base64 "$TMPDIR_MINT/sm_${i}_16.png" | tr -d '\n')
+      echo "<image x=\"$x\" y=\"0\" width=\"128\" height=\"128\" href=\"data:image/png;base64,$b64\" style=\"image-rendering: pixelated\"/>"
+    done
+    echo '</svg>'
+  } > "$TMPDIR_MINT/sm_final.svg"
+  rsvg-convert -w 1280 -h 128 "$TMPDIR_MINT/sm_final.svg" -o "$PREVIEW_STRIP"
+
+  _ok "${B}${PREVIEW_GRID}${X}        ${D}6×6 grid${X}"
+  _ok "${B}${PREVIEW_STRIP}${X}  ${D}true 16px renders, scaled up${X}"
+fi

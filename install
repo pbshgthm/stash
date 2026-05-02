@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# loco — installer
+# install — generic installer for any tool in stash.
 #
 # usage:
-#   curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/loco | bash
-#   ./install/loco        (when run from a local clone)
+#   curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s <tool>
+#   ./install <tool>     (when run from a local clone)
 #
-# Drops loco into ~/.local/bin/loco. After install, run `loco init`
-# to set up the Caddy daemon (one-time, idempotent).
+# Drops tools/<tool>/<tool> into ~/.local/bin/<tool>. After-install hints (e.g.
+# `loco init` for service tools) are tool-specific and live in each README.
 
-TOOL="loco"
-RAW_URL="https://raw.githubusercontent.com/pbshgthm/stash/main/$TOOL"
+REPO_RAW="https://raw.githubusercontent.com/pbshgthm/stash/main"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 
 # --- style ---
@@ -27,6 +26,17 @@ _err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
 _info() { printf '%s\n' "${D}$*${X}"; }
 _die()  { _err "$*"; exit 1; }
 
+# --- args ---
+TOOL="${1:-}"
+if [[ -z "$TOOL" ]]; then
+    _err "usage: install <tool>"
+    _info "  available: loco, pluck, mint"
+    exit 1
+fi
+
+# Block path tricks; tool names are short lowercase words by convention.
+[[ "$TOOL" =~ ^[a-z][a-z0-9-]*$ ]] || _die "invalid tool name: $TOOL"
+
 # --- preflight ---
 command -v curl >/dev/null 2>&1 || _die "curl is required but not found in PATH"
 
@@ -34,12 +44,13 @@ command -v curl >/dev/null 2>&1 || _die "curl is required but not found in PATH"
 mkdir -p "$BIN_DIR"
 target="$BIN_DIR/$TOOL"
 tmp="$target.tmp.$$"
-
-# atomic write — clean tmp on any exit
 trap 'rm -f "$tmp"' EXIT
 
+raw_url="$REPO_RAW/tools/$TOOL/$TOOL"
 _info "fetching ${B}$TOOL${X}${D} → $target${X}"
-curl -fsSL "$RAW_URL" -o "$tmp"
+if ! curl -fsSL "$raw_url" -o "$tmp"; then
+    _die "couldn't fetch $raw_url — does the tool exist?"
+fi
 chmod +x "$tmp"
 mv -f "$tmp" "$target"
 
@@ -58,6 +69,4 @@ esac
 
 # --- next steps ---
 printf '\n'
-_info "next:"
-_info "  ${B}$TOOL init${X}${D}    — first-time daemon setup (idempotent)${X}"
-_info "  ${B}$TOOL --help${X}${D}  — see what it does${X}"
+_info "next: ${B}$TOOL --help${X}"

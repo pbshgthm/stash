@@ -12,22 +12,26 @@ a personal stash of single-file bash tools for macOS, by [Poobesh Gowtham](https
 
 ## install
 
-Each tool installs itself with one curl. Pick the ones you want:
+One installer, one tool name. Pick the ones you want:
 
 ```bash
 # loco — local dev domains
-curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/loco | bash
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s loco
 
 # pluck — github file downloader
-curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/pluck | bash
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s pluck
+
+# mint — random favicon generator
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s mint
 ```
 
-Each script drops the tool into `~/.local/bin/<name>`. If `~/.local/bin` isn't on your `PATH`, the installer prints the exact line to drop in your shell rc.
+Each invocation drops `~/.local/bin/<tool>`. If `~/.local/bin` isn't on your `PATH`, the installer prints the exact line to drop in your shell rc.
 
 ## tools
 
-- [`loco`](./loco.md) — make any project a local domain in two seconds
-- [`pluck`](./pluck.md) — github file downloader
+- [`loco`](./tools/loco/README.md) — make any project a local domain in two seconds
+- [`pluck`](./tools/pluck/README.md) — github file downloader
+- [`mint`](./tools/mint/README.md) — random favicon generator
 
 ## per-tool setup
 
@@ -37,7 +41,7 @@ Each script drops the tool into `~/.local/bin/<name>`. If `~/.local/bin` isn't o
 loco init
 ```
 
-One-shots like `pluck` don't have an `init` — they're ready as soon as they're on `PATH`.
+One-shots like `pluck` and `mint` don't have an `init` — they're ready as soon as they're on `PATH`.
 
 ## philosophy
 
@@ -61,8 +65,8 @@ Then remove the binary:
 rm ~/.local/bin/loco
 ```
 
-For one-shots like `pluck`, just `rm ~/.local/bin/pluck`.
+For one-shots like `pluck` or `mint`, just `rm ~/.local/bin/<tool>`.
 
 ## site
 
-The landing page lives in [`site/`](./site/). Astro + Tailwind v4. Auto-discovers any new util whose `.md` file has a sibling executable in the repo root.
+The landing page lives in [`site/`](./site/). Astro + Tailwind v4. Auto-discovers any new tool that lives at `tools/<name>/<name>` with a sibling `README.md`.

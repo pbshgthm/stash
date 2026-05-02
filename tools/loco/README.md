@@ -60,10 +60,10 @@ A name can contain dots: `loco add admin.myapp 5181` produces `http://admin.myap
 
 ### Ports
 
-Thin wrappers around the `port` util, if you have it installed at `~/.local/bin/port`:
+Port utilities, built on `lsof`:
 
-- `loco kill <port> [...]` — kill the process(es) on the given port(s).
-- `loco ps [pattern]` — list listeners.
+- `loco kill <port> [...] [-f]` — kill the listener(s) on the given port(s). Sends SIGTERM, polls for ~2s, then escalates to SIGKILL for stragglers. `-f` skips the confirm prompt.
+- `loco ps [pattern]` — list TCP listeners. Optional pattern filters on command, address, user, or argv (numeric pattern is treated as an exact port).
 - `loco ip` — print the LAN IP of `en0`/`en1`.
 
 ## How it works

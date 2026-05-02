@@ -26,7 +26,6 @@ _resolve_script() {
 SCRIPT_PATH="$(_resolve_script)"
 SYMLINK_PATH="$HOME/.local/bin/loco"
 
-PORT_CMD="$HOME/.local/bin/port"
 TLD="localhost"
 PLIST_LABEL="com.loco.caddy"
 PLIST_PATH="/Library/LaunchDaemons/${PLIST_LABEL}.plist"
@@ -54,6 +53,56 @@ _lan_ip() {
 
 _port_active() {
     lsof -nP -iTCP:"$1" -sTCP:LISTEN &>/dev/null
+}
+
+# --- port helpers (embedded; no external dep) ---
+
+_pids_on_port() {
+    # PIDs holding TCP $1 in LISTEN, sorted unique. Empty if nothing.
+    # `|| true` swallows lsof's exit-1-on-no-match under pipefail.
+    lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -un || true
+}
+
+_pretty_cmd() {
+    # Full ps argv for $1, $HOME→~. "?" if pid is gone.
+    local pid="$1" cmd
+    cmd=$(ps -p "$pid" -o command= 2>/dev/null | tr -d '\n' || true)
+    [[ -z "$cmd" ]] && { printf '?'; return; }
+    [[ -n "${HOME:-}" ]] && cmd="${cmd//$HOME/\~}"
+    printf '%s' "$cmd"
+}
+
+_fit() {
+    # Truncate $1 to fit in $2 columns, ellipsizing.
+    local s="$1" n="$2"
+    if (( ${#s} <= n )); then printf '%s' "$s"
+    elif (( n <= 1 )); then printf '…'
+    else printf '%s…' "${s:0:n-1}"
+    fi
+}
+
+_term_cols() {
+    local c
+    c=$(tput cols 2>/dev/null) || c=80
+    (( c > 0 )) || c=80
+    printf '%s' "$c"
+}
+
+_listeners() {
+    # Tab-separated rows: port \t pid \t user \t cmd \t addr. Sorted by port,pid.
+    # awk reconstructs NAME from $9..$NF because addresses can contain spaces.
+    lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk -v OFS='\t' '
+        NR == 1 { next }
+        {
+            name = $9
+            for (i = 10; i <= NF; i++) name = name " " $i
+            sub(/ *\(LISTEN\)$/, "", name)
+            n = split(name, parts, ":")
+            port = parts[n]
+            if (port !~ /^[0-9]+$/) next
+            print port, $2, $3, $1, name
+        }
+    ' | sort -t$'\t' -k1,1n -k2,2n || true
 }
 
 _ensure_dirs() {
@@ -360,13 +409,175 @@ cmd_list() {
 }
 
 cmd_kill() {
-    [[ -x "$PORT_CMD" ]] || _die "port tool not found at $PORT_CMD"
-    "$PORT_CMD" kill "$@"
+    local force=false
+    local ports=()
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -f|--force) force=true ;;
+            -*) _err "unknown flag: $arg"; return 1 ;;
+            *)
+                if ! [[ "$arg" =~ ^[0-9]+$ ]] || (( arg < 1 || arg > 65535 )); then
+                    _err "invalid port: $arg (1-65535)"
+                    return 2
+                fi
+                ports+=("$arg")
+                ;;
+        esac
+    done
+
+    if (( ${#ports[@]} == 0 )); then
+        _err "usage: loco kill <port> [...] [-f]"
+        return 1
+    fi
+
+    # Gather "port|pid|cmd" rows + flat PID list.
+    local rows=() pids_all=()
+    local p pid plist
+    for p in "${ports[@]}"; do
+        plist=$(_pids_on_port "$p")
+        if [[ -z "$plist" ]]; then
+            _info "nothing listening on tcp/$p"
+            continue
+        fi
+        while IFS= read -r pid; do
+            [[ -z "$pid" ]] && continue
+            rows+=("${p}|${pid}|$(_pretty_cmd "$pid")")
+            pids_all+=("$pid")
+        done <<<"$plist"
+    done
+
+    if (( ${#rows[@]} == 0 )); then
+        return 1
+    fi
+
+    local pids_unique cols cmd_w
+    pids_unique=$(printf '%s\n' "${pids_all[@]}" | sort -un)
+    cols=$(_term_cols)
+    cmd_w=$(( cols - 21 ))
+    (( cmd_w < 28 )) && cmd_w=28
+
+    local n_proc=0
+    while IFS= read -r _; do n_proc=$((n_proc + 1)); done <<<"$pids_unique"
+    local pl=""; (( n_proc != 1 )) && pl="es"
+
+    local port_list
+    port_list=$(printf '%s ' "${ports[@]}")
+    port_list="${port_list% }"
+
+    printf '%sStop %d process%s on port %s%s\n\n' "$D" "$n_proc" "$pl" "$port_list" "$X"
+    printf '  %s%5s  %8s  %s%s\n' "${B}${C}" "PORT" "PID" "COMMAND" "$X"
+    local row p2 pid2 cmd2
+    for row in "${rows[@]}"; do
+        IFS='|' read -r p2 pid2 cmd2 <<<"$row"
+        printf '  %5d  %8d  %s\n' "$p2" "$pid2" "$(_fit "$cmd2" "$cmd_w")"
+    done
+    echo
+
+    if [[ "$force" != true ]]; then
+        local answer
+        read -rp "  Kill these processes? [y/N] " answer
+        if ! _yes "$answer"; then
+            _info "cancelled"
+            return 0
+        fi
+    fi
+
+    # SIGTERM all unique PIDs.
+    while IFS= read -r pid; do
+        [[ -z "$pid" ]] && continue
+        kill -TERM "$pid" 2>/dev/null || true
+    done <<<"$pids_unique"
+
+    # Poll up to ~2s for survivors before escalating.
+    local survivors="" i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        survivors=""
+        while IFS= read -r pid; do
+            [[ -z "$pid" ]] && continue
+            kill -0 "$pid" 2>/dev/null && survivors+="${pid}"$'\n'
+        done <<<"$pids_unique"
+        [[ -z "$survivors" ]] && break
+        sleep 0.1
+    done
+
+    local pid_csv
+    pid_csv=$(printf '%s' "$pids_unique" | tr '\n' ',' | sed 's/^,//;s/,$//;s/,/, /g')
+
+    if [[ -z "$survivors" ]]; then
+        _ok "sigterm → ${pid_csv}"
+        return 0
+    fi
+
+    # Escalate to SIGKILL for stragglers.
+    while IFS= read -r pid; do
+        [[ -z "$pid" ]] && continue
+        kill -KILL "$pid" 2>/dev/null || true
+    done <<<"$survivors"
+    sleep 0.2
+
+    local zombies=""
+    while IFS= read -r pid; do
+        [[ -z "$pid" ]] && continue
+        kill -0 "$pid" 2>/dev/null && zombies+="${pid}"$'\n'
+    done <<<"$survivors"
+
+    local sk_csv
+    sk_csv=$(printf '%s' "$survivors" | tr '\n' ',' | sed 's/^,//;s/,$//;s/,/, /g')
+
+    if [[ -n "$zombies" ]]; then
+        local z_csv
+        z_csv=$(printf '%s' "$zombies" | tr '\n' ',' | sed 's/^,//;s/,$//;s/,/, /g')
+        _err "could not kill: ${z_csv} (try sudo)"
+        return 1
+    fi
+
+    _ok "sigterm → ${pid_csv}"
+    _info "  sigkill (escalated) → ${sk_csv}"
 }
 
 cmd_ps() {
-    [[ -x "$PORT_CMD" ]] || _die "port tool not found at $PORT_CMD"
-    "$PORT_CMD" list "$@"
+    local match="${1:-}"
+    local rows
+    rows=$(_listeners)
+
+    if [[ -z "$rows" ]]; then
+        _info "(no TCP listeners)"
+        return 0
+    fi
+
+    if [[ -n "$match" ]]; then
+        local needle filtered=""
+        needle=$(printf '%s' "$match" | tr '[:upper:]' '[:lower:]')
+        local port pid user cmd addr ps_line hay matched
+        while IFS=$'\t' read -r port pid user cmd addr; do
+            matched=false
+            if [[ "$match" =~ ^[0-9]+$ ]] && [[ "$port" == "$match" ]]; then
+                matched=true
+            else
+                ps_line=$(_pretty_cmd "$pid")
+                hay=$(printf '%s\t%s\t%s\t%s' "$cmd" "$user" "$addr" "$ps_line" | tr '[:upper:]' '[:lower:]')
+                [[ "$hay" == *"$needle"* ]] && matched=true
+            fi
+            if [[ "$matched" == true ]]; then
+                filtered+="${port}	${pid}	${user}	${cmd}	${addr}"$'\n'
+            fi
+        done <<<"$rows"
+
+        if [[ -z "$filtered" ]]; then
+            _info "(no matches for '$match')"
+            return 0
+        fi
+        rows="${filtered%$'\n'}"
+        _info "filter: '$match'"
+        echo
+    fi
+
+    printf '  %s%5s  %8s  %-8s  %-16s  %s%s\n' "${B}${C}" "PORT" "PID" "USER" "COMMAND" "ADDRESS" "$X"
+    local port pid user cmd addr
+    while IFS=$'\t' read -r port pid user cmd addr; do
+        printf '  %5d  %8d  %-8s  %-16s  %s\n' "$port" "$pid" "$user" "$cmd" "$addr"
+    done <<<"$rows"
 }
 
 cmd_ip() {
@@ -485,8 +696,8 @@ ${C}Projects:${X}
   loco list                   List all mappings with status
 
 ${C}Ports:${X}
-  loco kill <port> [...]      Kill process(es) on port(s)
-  loco ps [pattern]           List port listeners
+  loco kill <port> [...] [-f] Kill listener(s) on port(s); SIGTERM, then SIGKILL after 2s
+  loco ps [pattern]           List TCP listeners (filter by command/user/addr/port)
 
 ${C}Other:${X}
   loco ip                     Show LAN IP

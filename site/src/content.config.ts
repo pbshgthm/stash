@@ -1,12 +1,13 @@
 import { defineCollection } from 'astro:content';
 import { glob } from 'astro/loaders';
 
-// Per repo convention: every util has a sibling `<name>.md`. We pick those up
-// and skip docs that aren't tool-docs (CLAUDE.md, README.md, etc.).
+// Per repo convention: every tool lives at `tools/<name>/<name>` with a sibling
+// `README.md`. The slug is the folder name, derived via `generateId`.
 const utils = defineCollection({
   loader: glob({
-    pattern: ['*.md', '!CLAUDE.md', '!README.md'],
+    pattern: 'tools/*/README.md',
     base: '../',
+    generateId: ({ entry }) => entry.split('/')[1],
   }),
 });
 
