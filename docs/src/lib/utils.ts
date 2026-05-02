@@ -5,7 +5,7 @@ import { getCollection } from 'astro:content';
 import { summarize } from './parse';
 import { colorOf } from './colors';
 
-// utils.ts lives at site/src/lib/ — three `..` reach the repo root.
+// utils.ts lives at docs/src/lib/ — three `..` reach the repo root.
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 // Per repo convention every tool lives at `tools/<slug>/<slug>` with the

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "utils-site",
+      "name": "utils-docs",
       "dependencies": {
         "@tailwindcss/vite": "^4.0.0",
         "astro": "^5.5.0",
