@@ -67,6 +67,6 @@ rm ~/.local/bin/loco
 
 For one-shots like `pluck` or `mint`, just `rm ~/.local/bin/<tool>`.
 
-## site
+## docs
 
-The landing page lives in [`site/`](./site/). Astro + Tailwind v4. Auto-discovers any new tool that lives at `tools/<name>/<name>` with a sibling `README.md`.
+The landing page lives in [`docs/`](./docs/). Astro + Tailwind v4. Auto-discovers any new tool that lives at `tools/<name>/<name>` with a sibling `README.md`.
