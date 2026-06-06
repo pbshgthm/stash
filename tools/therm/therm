@@ -1,0 +1,493 @@
+#!/usr/bin/env bash
+# therm — why is your Mac hot? a plain-English power & thermal read for Apple Silicon
+set -euo pipefail
+
+# --- style ---
+# The report IS the output, so it goes to stdout — guard color on -t 1.
+if [[ -t 1 ]]; then
+    B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
+    C=$'\033[36m' W=$'\033[37m' Y=$'\033[33m'  X=$'\033[0m'
+else
+    B= D= G= R= C= W= Y= X=
+fi
+
+_err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
+_info() { printf '%s\n' "${D}$*${X}" >&2; }
+_die()  { _err "$*"; exit 1; }
+
+# --- float / format helpers (bash has no floats; lean on awk) ---
+_gt()    { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }       # a > b ?
+_w()     { awk -v v="${1:-0}" 'BEGIN{printf "%.0f W", v}'; }               # watts, whole
+_mmss()  { awk -v s="${1:-0}" 'BEGIN{printf "%d:%02d", int(s/60), s%60}'; }
+
+# "40s" / "2m" / "1h" / "90" → seconds
+_dur2sec() {
+    case "$1" in
+        *[!0-9smh]*|"") return 1 ;;
+        *h) printf '%d' "$(( ${1%h} * 3600 ))" ;;
+        *m) printf '%d' "$(( ${1%m} * 60 ))" ;;
+        *s) printf '%d' "$(( ${1%s} ))" ;;
+        *)  printf '%d' "$1" ;;
+    esac
+}
+
+# Horizontal block bar: value, max, width(cells).
+_bar() {
+    awk -v v="${1:-0}" -v m="${2:-1}" -v w="${3:-14}" 'BEGIN{
+        if (m <= 0) m = 1
+        f = v / m; if (f > 1) f = 1
+        n = int(f * w + 0.5)
+        s = ""
+        for (i = 0; i < n; i++) s = s "█"
+        for (i = n; i < w; i++) s = s "░"
+        print s
+    }'
+}
+
+# --- powermetrics capture ---
+# One sample averaged over the window (-n 1, large -i): inherently "sustained",
+# and a single block is far simpler to parse than N stitched samples.
+SAMPLERS="cpu_power,gpu_power,thermal,tasks"
+_capture() {  # $1 = window ms → raw text on stdout
+    sudo powermetrics --samplers "$SAMPLERS" \
+        --show-process-energy --show-process-gpu \
+        -i "$1" -n 1 2>/dev/null
+}
+
+# Prime the sudo timestamp up front so the password prompt never lands mid-capture
+# (capture hides powermetrics' stderr, which would otherwise swallow the prompt).
+_sudo_prime() {
+    sudo -n true 2>/dev/null && return 0
+    _info "therm reads powermetrics, which needs root — you'll be asked once."
+    sudo -v || _die "sudo required to sample power/thermal data"
+}
+
+# --- field extractors (label-based: tolerant of column / version drift) ---
+
+# Last value (in watts) on a line matching the anchored label. Normalises mW→W.
+_pm_w() {  # $1 = ERE label ; $2 = file
+    awk -v pat="$1" '
+        $0 ~ pat {
+            for (i = 1; i <= NF; i++)
+                if ($i ~ /^[0-9]+(\.[0-9]+)?$/) { val = $i; unit = $(i+1); found = 1; break }
+        }
+        END { if (found) { if (unit ~ /^mW/) val = val / 1000; printf "%.3f", val } }
+    ' "$2"
+}
+
+# Thermal pressure level word (Nominal, Moderate, Heavy, …).
+_pm_pressure() {  # $1 = file
+    awk -F: '/pressure level:/ { v = $2 } END {
+        gsub(/^[ \t]+|[ \t]+$/, "", v); if (v != "") print v
+    }' "$1"
+}
+
+# Per-process rows: energy<TAB>cpu_ms<TAB>gpu_ms<TAB>name (real processes only).
+# Column COUNT/order is stable with our flags, but the grouped headers ("Deadlines
+# (…)", "Wakeups (…)") make header text positions diverge from the data columns —
+# so parse POSITIONALLY: ID = first integer field, CPU ms/s = the field after it,
+# GPU ms/s = second-to-last, Energy Impact = last. Survives middle-column drift,
+# and joining the pre-ID fields keeps process names that contain spaces intact.
+_pm_tasks() {  # $1 = file
+    awk '
+        /Running tasks/ { intab = 1; next }
+        intab && /CPU ms\/s/ { hdr = 1; next }
+        hdr {
+            if ($0 ~ /^\*\*\*/ || $0 ~ /^[[:space:]]*$/) { hdr = 0; intab = 0; next }
+            idi = 0
+            for (i = 1; i <= NF; i++) if ($i ~ /^-?[0-9]+$/) { idi = i; break }
+            if (idi == 0 || $(idi) + 0 < 0) next      # skip header & DEAD/ALL_TASKS aggregates
+            name = ""; for (i = 1; i < idi; i++) name = name (i > 1 ? " " : "") $i
+            printf "%s\t%s\t%s\t%s\n", $(NF) + 0, $(idi + 1) + 0, $(NF - 1) + 0, name
+        }
+    ' "$1"
+}
+
+# Sort task rows by CPU/GPU load — the number we actually display — so bars are
+# monotonic and the list reads cleanly top-down. Takes a file arg or stdin.
+_rank() {
+    awk -F'\t' '{ l=($2>$3)?$2:$3; printf "%s\t%s\n", l, $0 }' "${1:-/dev/stdin}" \
+        | sort -t$'\t' -k1 -rn | cut -f2-
+}
+
+# --- what is this process? short, plain descriptions of cryptic macOS names ---
+# Just says what it IS — no advice. Unknown names (usually your own apps, whose
+# names already explain themselves) return empty.
+_describe() {  # $1 = process name
+    case "$1" in
+        kernel_task)               printf 'macOS kernel & thermal control' ;;
+        WindowServer)              printf 'the display & graphics compositor' ;;
+        WindowManager)             printf 'Stage Manager / window management' ;;
+        coreaudiod)                printf 'macOS audio server' ;;
+        launchd)                   printf 'the macOS service launcher' ;;
+        logd)                      printf 'system logging' ;;
+        mds|mds_stores|mdworker|mdworker_shared|mdbulkimport|spotlightknowledged) printf 'Spotlight search indexing' ;;
+        backgroundtaskmanagementd) printf 'background & login-item manager' ;;
+        duetexpertd|coreduetd)     printf 'system activity prediction' ;;
+        biomed|biomesyncd)         printf 'on-device activity (Biome) sync' ;;
+        bird)                      printf 'iCloud Drive sync' ;;
+        cloudd)                    printf 'iCloud sync' ;;
+        syncdefaultsd)             printf 'iCloud settings sync' ;;
+        nsurlsessiond)             printf 'background downloads' ;;
+        photoanalysisd|photolibraryd) printf 'Photos library analysis' ;;
+        backupd|backupd-helper)    printf 'Time Machine backup' ;;
+        apsd)                      printf 'Apple Push Notifications' ;;
+        akd|akauthenticationd)     printf 'Apple ID authentication' ;;
+        trustd)                    printf 'certificate validation' ;;
+        tccd)                      printf 'privacy permissions (TCC)' ;;
+        syspolicyd|amfid)          printf 'app security & code-signing' ;;
+        powerd)                    printf 'power management' ;;
+        thermalmonitord)           printf 'thermal monitoring' ;;
+        bluetoothd)                printf 'Bluetooth' ;;
+        wifid|airportd)            printf 'Wi-Fi' ;;
+        mDNSResponder)             printf 'DNS & Bonjour networking' ;;
+        sharingd)                  printf 'AirDrop & Handoff' ;;
+        rapportd)                  printf 'Continuity / Handoff' ;;
+        searchpartyd)              printf 'Find My' ;;
+        fseventsd)                 printf 'filesystem change tracking' ;;
+        runningboardd)             printf 'app lifecycle management' ;;
+        distnoted)                 printf 'notification dispatch' ;;
+        cfprefsd)                  printf 'preferences service' ;;
+        hidd)                      printf 'input devices' ;;
+        loginwindow)               printf 'your login session' ;;
+        Dock)                      printf 'the Dock' ;;
+        Finder)                    printf 'Finder' ;;
+        Safari|com.apple.WebKit.WebContent|com.apple.WebKit.GPU) printf 'Safari web content' ;;
+        assistantd|corespeechd|siriactionsd) printf 'Siri' ;;
+        gamecontrollerd|gamepolicyd) printf 'game controllers' ;;
+        *)                         printf '' ;;
+    esac
+}
+
+# --- which app is feeding coreaudiod? (no sudo) ---
+# coreaudiod is a proxy — the heat is really whatever app opened the audio stream.
+# Each audio-out assertion records the PID it was "Created for"; resolve those to names.
+_audio_source() {  # → comma-joined app name(s), or empty
+    local pids p nm seen="" out=""
+    pids=$(pmset -g assertions 2>/dev/null | awk '
+        /\(coreaudiod\)/ && /audio/ { f = 1 }
+        f && /Created for PID:/ { if (match($0, /[0-9]+/)) print substr($0, RSTART, RLENGTH); f = 0 }
+    ' | sort -u)
+    [[ -n $pids ]] || return 0
+    for p in $pids; do
+        nm=$(ps -p "$p" -o comm= 2>/dev/null) || continue
+        [[ -n $nm ]] || continue
+        nm=$(basename "$nm")
+        case ",$seen," in *",$nm,"*) continue ;; esac      # dedupe
+        seen="$seen,$nm"; out="${out:+$out, }$nm"
+    done
+    printf '%s' "$out"
+}
+
+# --- heat context beyond compute: battery temp, power source, displays (no sudo) ---
+# Charging and a hot battery heat the chassis independently of CPU/GPU load, and
+# external displays drive the GPU/display engine — all readable in plain bash.
+_context() {
+    local io bt src ext charging watts ndisp dpart=""
+    io=$(ioreg -n AppleSmartBattery -r -d 1 2>/dev/null) || return 0
+    # AppleSmartBattery "Temperature" is centi-°C (3111 → 31 °C); take the scalar one.
+    bt=$(printf '%s\n' "$io" | awk -F' = ' '/"Temperature" = [0-9]/{printf "%.0f", $2/100; exit}')
+    ext=$(printf '%s\n' "$io" | awk -F' = ' '/"ExternalConnected"/{gsub(/[^A-Za-z]/,"",$2);print $2;exit}')
+    charging=$(printf '%s\n' "$io" | awk -F' = ' '/"IsCharging"/{gsub(/[^A-Za-z]/,"",$2);print $2;exit}')
+    if [[ $ext == Yes ]]; then
+        watts=$(printf '%s\n' "$io" | grep -o '"Watts"=[0-9]*' | head -1 | cut -d= -f2)
+        if [[ $charging == Yes ]]; then src="charging${watts:+ ~${watts}W} — adds heat"
+        else src="plugged in, not charging"; fi
+    else
+        src="on battery"
+    fi
+    # external displays = total panels minus the built-in one
+    ndisp=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -c 'Resolution:')
+    if [[ ${ndisp:-0} -gt 1 ]]; then
+        dpart=" · $((ndisp - 1)) external display(s) — extra GPU load"
+    fi
+    printf '  %sbattery %s°C · %s%s%s\n' "$D" "${bt:-?}" "$src" "$dpart" "$X"
+}
+
+# --- optional chip die temps via macmon (sudoless) — used only if it's installed ---
+# powermetrics exposes no die temp / fan on Apple Silicon; macmon reads the private
+# HID sensors. Kept strictly optional so therm stays dependency-free without it.
+# (macmon reports temps but not fan RPM, so therm doesn't claim a fan reading.)
+_macmon_temps() {
+    command -v macmon >/dev/null 2>&1 || return 0
+    local j cpu gpu
+    j=$(macmon pipe -s 1 -i 400 2>/dev/null) || return 0
+    cpu=$(printf '%s' "$j" | grep -o '"cpu_temp_avg":[0-9.]*' | head -1 | cut -d: -f2)
+    [[ -n $cpu ]] || return 0
+    cpu=$(awk -v v="$cpu" 'BEGIN{printf "%.0f", v}')
+    gpu=$(printf '%s' "$j" | grep -o '"gpu_temp_avg":[0-9.]*' | head -1 | cut -d: -f2)
+    if [[ -n $gpu ]]; then
+        gpu=$(awk -v v="$gpu" 'BEGIN{printf "%.0f", v}')
+        printf '  %schip: CPU %s°C · GPU %s°C%s\n' "$D" "$cpu" "$gpu" "$X"
+    else
+        printf '  %schip: CPU %s°C%s\n' "$D" "$cpu" "$X"
+    fi
+}
+
+# --- the one renderer (snapshot and window-summary both feed it) ---
+_render() {  # $1=label $2=cpu $3=gpu $4=ane $5=pkg $6=pressure $7=tasksfile
+    local label="$1" cpu="$2" gpu="$3" ane="$4" pkg="$5" press="${6:-Nominal}" tf="$7"
+    : "${cpu:=0}" "${gpu:=0}" "${ane:=0}" "${pkg:=0}"
+
+    # severity: thermal pressure is authoritative; raw watts is the tiebreak while
+    # pressure is still Nominal (working hard but not yet throttled).
+    local plow lvl col tag
+    plow=$(printf '%s' "$press" | tr '[:upper:]' '[:lower:]')
+    case $plow in
+        *heavy*|*serious*|*trapping*|*critical*|*sleep*) lvl=2 ;;
+        *moderate*|*fair*|*light*)                       lvl=1 ;;
+        *)                                               lvl=0 ;;
+    esac
+    if   [[ $lvl -ge 2 ]];                  then col=$R; tag="HOT"
+    elif [[ $lvl -eq 1 ]] || _gt "$pkg" 25; then col=$Y; tag="WARM"
+    else col=$G; tag="COOL"
+    fi
+
+    # which subsystem pulls the most watts
+    local driver
+    driver=$(awk -v c="$cpu" -v g="$gpu" -v a="$ane" 'BEGIN{
+        m=c; d="CPU"; if(g>m){m=g;d="GPU"} if(a>m){m=a;d="the Neural Engine"}
+        if(m<=0.15) d="none"; print d }')
+
+    # Name the culprit from WITHIN the driving subsystem, so "X via the GPU" always
+    # points at an actual GPU user (a busy CPU process can out-rank it on raw ms/s).
+    local top culprit ctype apct sortk desc="" dp="" audiosrc=""
+    if [[ -s $tf ]]; then
+        grep -q 'coreaudiod' "$tf" && audiosrc=$(_audio_source)   # coreaudiod → the app feeding it
+        case $driver in
+            GPU) sortk=3; ctype="GPU" ;;
+            CPU) sortk=2; ctype="CPU" ;;
+            *)   sortk=0 ;;                       # none / Neural Engine → fall back to load
+        esac
+        if [[ ${sortk:-0} -eq 0 ]]; then
+            top=$(_rank "$tf" | head -1)
+            ctype=$(printf '%s' "$top" | awk -F'\t' '{print ($3>$2)?"GPU":"CPU"}')
+        else
+            top=$(sort -t$'\t' -k"$sortk" -rn "$tf" | head -1)
+        fi
+        culprit=$(printf '%s' "$top" | cut -f4)
+        apct=$(printf '%s' "$top" | awk -F'\t' -v k="${sortk:-0}" '{ l=(k==0)?(($3>$2)?$3:$2):$k; printf "%.0f", l/10 }')
+        # driving subsystem has no attributable process → name the overall busiest instead
+        if [[ ${apct:-0} -eq 0 && ${sortk:-0} -ne 0 ]]; then
+            top=$(_rank "$tf" | head -1)
+            culprit=$(printf '%s' "$top" | cut -f4)
+            ctype=$(printf '%s' "$top" | awk -F'\t' '{print ($3>$2)?"GPU":"CPU"}')
+            apct=$(printf '%s' "$top" | awk -F'\t' '{l=($3>$2)?$3:$2; printf "%.0f", l/10}')
+        fi
+        desc=$(_describe "$culprit")
+        [[ $culprit == coreaudiod && -n $audiosrc ]] && desc="${desc:+$desc → }$audiosrc"
+        [[ -n $desc ]] && dp=" ${D}(${desc})${X}"
+    fi
+    : "${apct:=0}"
+
+    # ---- verdict: one plain sentence — names the issue, no advice ----
+    printf '\n  %s●%s %s%s%s  ' "$col" "$X" "$col$B" "$tag" "$X"
+    if [[ $driver == none || -z ${culprit:-} ]]; then
+        printf '%snothing is stressing your Mac right now%s\n' "$D" "$X"
+    else
+        case $tag in
+            HOT)  printf '%s%s%s%s is overheating your Mac via the %s\n' "$B" "$culprit" "$X" "$dp" "$ctype" ;;
+            WARM) printf '%s%s%s%s is working the %s hard %s(%s)%s\n' "$B" "$culprit" "$X" "$dp" "$ctype" "$D" "$(_w "$pkg")" "$X" ;;
+            COOL) if [[ $apct -ge 80 ]]; then
+                      printf '%snothing'\''s overheating — but %s%s%s%s is busy on the %s %s(%s%%)%s\n' "$D" "$B" "$culprit" "$X" "$dp" "$ctype" "$D" "$apct" "$X"
+                  else
+                      printf '%snothing is stressing your Mac right now%s\n' "$D" "$X"
+                  fi ;;
+        esac
+    fi
+    [[ $lvl -ge 2 ]] && printf '     %smacOS is throttling to cool down%s\n' "$D" "$X"
+
+    # ---- top processes: tagged CPU/GPU, ranked by load, with a short description ----
+    if [[ -s $tf ]]; then
+        printf '\n  %swhat'\''s using power%s %s· %s%s\n' "$C" "$X" "$D" "$label" "$X"
+        _rank "$tf" | head -5 | while IFS=$'\t' read -r en cpu gpu name; do
+            d=$(_describe "$name")
+            [[ $name == coreaudiod && -n $audiosrc ]] && d="${d:+$d }→ $audiosrc"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$en" "$cpu" "$gpu" "$name" "$d"
+        done | awk -F'\t' -v B="$B" -v D="$D" -v C="$C" -v X="$X" '
+            NR==1 { mx = ($2>$3)?$2:$3; if (mx <= 0) mx = 1 }
+            {
+                gpu = ($3 > $2); load = gpu?$3:$2; type = gpu?"GPU":"CPU"
+                f = load/mx; if (f>1) f=1; n = int(f*8+0.5)
+                bar=""; for(i=0;i<n;i++)bar=bar"█"; for(i=n;i<8;i++)bar=bar"░"
+                printf "    %s%-17s%s %s%s%s  %s %4.0f%%   %s%s%s\n",
+                    (NR==1?B:""), substr($4,1,17), X, (NR==1?C:D), bar, X,
+                    type, load/10, D, substr($5,1,32), X
+            }'
+    fi
+
+    # ---- demoted, dim: raw watts, then off-chip heat sources (battery/charging) ----
+    printf '\n  %sCPU %s · GPU %s · ANE %s · total %s · pressure %s%s\n' \
+        "$D" "$(_w "$cpu")" "$(_w "$gpu")" "$(_w "$ane")" "$(_w "$pkg")" "$press" "$X"
+    _macmon_temps
+    _context
+    printf '\n'
+}
+
+# Pull the snapshot values out of a raw capture file and render them.
+_render_file() {  # $1 = raw file ; $2 = label
+    local f="$1" tf cpu gpu ane pkg press
+    cpu=$(_pm_w '^CPU Power:' "$f");  gpu=$(_pm_w '^GPU Power:' "$f")
+    ane=$(_pm_w '^ANE Power:' "$f")
+    pkg=$(_pm_w '^Combined Power' "$f"); [[ -z $pkg ]] && pkg=$(_pm_w '^Package Power' "$f")
+    press=$(_pm_pressure "$f"); [[ -z $press ]] && press="Nominal"
+    [[ -z $pkg ]] && pkg=$(awk -v a="${cpu:-0}" -v b="${gpu:-0}" -v c="${ane:-0}" 'BEGIN{printf "%.3f",a+b+c}')
+    tf=$(mktemp); _pm_tasks "$f" > "$tf"
+    _render "$2" "${cpu:-0}" "${gpu:-0}" "${ane:-0}" "${pkg:-0}" "$press" "$tf"
+    rm -f "$tf"
+}
+
+# --- commands ---
+
+# quick one-shot snapshot
+cmd_snapshot() {  # $1 = window seconds
+    local secs="${1:-5}" tmp
+    # authenticate first — the password prompt is a pre-step; the banner then heads
+    # the real output (its leading blank line gives the gap), not stranded above sudo.
+    _sudo_prime
+    if [[ -t 1 ]]; then _banner; printf '\n'; fi   # blank line between banner and the sampling notice
+    tmp=$(mktemp)
+    _info "sampling ${secs}s…"
+    # explicit cleanup, not a RETURN trap: a RETURN trap isn't function-scoped and
+    # would re-fire on main's return where $tmp is gone (unbound-variable under set -u).
+    _capture "$((secs * 1000))" > "$tmp" || true
+    if [[ ! -s $tmp ]]; then rm -f "$tmp"; _die "no data from powermetrics (sample failed or was cancelled)"; fi
+    _render_file "$tmp" "now"
+    rm -f "$tmp"
+}
+
+# observe forward over a window (or unbounded), live ticker, then a final summary
+TICK=2                      # seconds per sample while observing
+OBS_ACC=""; OBS_TMP=""; OBS_N=0; OBS_ELAPSED=0
+OBS_PCPU=0; OBS_PGPU=0; OBS_PANE=0; OBS_PPKG=0; OBS_PRESS="Nominal"; OBS_LVL=0; OBS_LABEL=""
+
+_obs_finish() {  # aggregate to per-sample averages, render the window summary, exit
+    printf '\033[?25h'                                  # cursor back
+    printf '\033[H\033[J'
+    [[ $OBS_N -gt 0 && -s $OBS_ACC ]] || { _info "stopped before the first sample landed"; rm -f "$OBS_ACC" "$OBS_TMP"; exit 0; }
+    local tf; tf=$(mktemp)
+    awk -F'\t' -v n="$OBS_N" '{e[$4]+=$1;c[$4]+=$2;g[$4]+=$3}
+        END{for(k in e) printf "%s\t%s\t%s\t%s\n", e[k]/n, c[k]/n, g[k]/n, k}' "$OBS_ACC" > "$tf"
+    [[ -t 1 ]] && _banner
+    # peaks tell the heat story better than averages over a long window
+    _render "over $OBS_LABEL (peak)" "$OBS_PCPU" "$OBS_PGPU" "$OBS_PANE" "$OBS_PPKG" "$OBS_PRESS" "$tf"
+    rm -f "$tf" "$OBS_ACC" "$OBS_TMP"
+    exit 0
+}
+
+cmd_observe() {  # $1 = total seconds (empty = unbounded) ; $2 = label for display
+    local total="${1:-}"; OBS_LABEL="${2:-}"
+    _sudo_prime
+    OBS_ACC=$(mktemp); OBS_TMP=$(mktemp)
+    trap '_obs_finish' INT TERM
+    printf '\033[?25l'
+    while :; do
+        _capture "$((TICK * 1000))" > "$OBS_TMP" 2>/dev/null || true
+        OBS_N=$((OBS_N + 1)); OBS_ELAPSED=$((OBS_ELAPSED + TICK))
+        local cpu gpu ane pkg press top app
+        cpu=$(_pm_w '^CPU Power:' "$OBS_TMP"); gpu=$(_pm_w '^GPU Power:' "$OBS_TMP")
+        ane=$(_pm_w '^ANE Power:' "$OBS_TMP")
+        pkg=$(_pm_w '^Combined Power' "$OBS_TMP"); [[ -z $pkg ]] && pkg=$(_pm_w '^Package Power' "$OBS_TMP")
+        press=$(_pm_pressure "$OBS_TMP"); [[ -z $press ]] && press="Nominal"
+        _pm_tasks "$OBS_TMP" >> "$OBS_ACC"
+        # track peaks
+        _gt "${cpu:-0}" "$OBS_PCPU" && OBS_PCPU=$cpu; _gt "${gpu:-0}" "$OBS_PGPU" && OBS_PGPU=$gpu
+        _gt "${ane:-0}" "$OBS_PANE" && OBS_PANE=$ane; _gt "${pkg:-0}" "$OBS_PPKG" && OBS_PPKG=$pkg
+        local lvl=0; case $(printf '%s' "$press" | tr '[:upper:]' '[:lower:]') in
+            *heavy*|*serious*|*trapping*|*critical*|*sleep*) lvl=2 ;; *moderate*|*fair*|*light*) lvl=1 ;; esac
+        [[ $lvl -gt $OBS_LVL ]] && { OBS_LVL=$lvl; OBS_PRESS=$press; }
+        # live ticker
+        top=$(_pm_tasks "$OBS_TMP" | _rank | head -1)
+        app=$(printf '%s' "$top" | cut -f4)
+        local appt; appt=$(printf '%s' "$top" | awk -F'\t' '{print ($3>$2)?"GPU":"CPU"}')
+        printf '\033[H\033[J'
+        if [[ -n $total ]]; then
+            printf '  %s%stherm%s %s· observing %s / %s · ctrl-c to stop%s\n' "$B" "$C" "$X" "$D" "$(_mmss "$OBS_ELAPSED")" "$(_mmss "$total")" "$X"
+        else
+            printf '  %s%stherm%s %s· observing %s · ctrl-c for summary%s\n' "$B" "$C" "$X" "$D" "$(_mmss "$OBS_ELAPSED")" "$X"
+        fi
+        printf '    %snow:%s %s now · %s%s%s on %s\n' "$D" "$X" "$(_w "$pkg")" "$B" "${app:-—}" "$X" "$appt"
+        printf '    %speak so far: %s · worst pressure: %s%s\n' "$D" "$(_w "$OBS_PPKG")" "$OBS_PRESS" "$X"
+        [[ -n $total && $OBS_ELAPSED -ge $total ]] && break
+    done
+    _obs_finish
+}
+
+cmd_raw() {  # $1 = window seconds ; dump raw powermetrics for debugging
+    local secs="${1:-5}"
+    _sudo_prime
+    _info "raw powermetrics, ${secs}s window:"
+    _capture "$((secs * 1000))"
+}
+
+# bold-cyan figlet banner (speed font); shown atop --help and each interactive run.
+_banner() {
+    printf '\n%s%s' "$B" "$C"
+    cat <<'BANNER'
+  ___________
+  __  /___  /____________________ ___
+  _  __/_  __ \  _ \_  ___/_  __ `__ \
+  / /_ _  / / /  __/  /   _  / / / / /
+  \__/ /_/ /_/\___//_/    /_/ /_/ /_/
+BANNER
+    printf '%s' "$X"
+}
+
+usage() {
+    _banner
+    cat <<EOF
+
+  ${B}therm${X} ${D}— why is your Mac hot? plain-English power & heat for Apple Silicon${X}
+
+${C}Usage:${X}
+  therm                  Quick snapshot — what's stressing the Mac right now
+  therm <duration>       Watch over a window, then summarise   ${D}e.g. 40s · 2m · 1h${X}
+  therm watch            Watch indefinitely (ctrl-c prints the summary)
+  therm raw [seconds]    Dump raw powermetrics output (debugging)
+  therm -h | --help      Help
+
+${C}What you get:${X}
+  · one plain sentence — ${B}is it hot, which app, and is it CPU or GPU${X}
+  · the top processes, each tagged ${B}CPU${X} or ${B}GPU${X}, with a short note on what each is
+  · context (dim): chip & battery temp, charging, external displays, raw watts
+
+${C}Notes:${X}
+  · ${B}Durations look forward${X}, not back: \`therm 2m\` watches the next 2 minutes
+    (there's no background recorder by design — nothing installed, nothing to undo).
+  · Heat = sustained power, not the twitchy CPU% Activity Monitor shows. RAM doesn't
+    meaningfully heat Apple Silicon — it's CPU, GPU, or the Neural Engine.
+  · Reads ${W}powermetrics${X} (needs root): therm runs ${W}sudo -v${X} once per session, then samples.
+  · Optional: ${W}brew install macmon${X} (no sudo) and therm adds CPU/GPU die temps;
+    without it, thermal pressure stands in. macOS exposes no fan RPM on Apple Silicon.
+
+${C}Examples:${X}
+  therm                  # right now, why are the fans on?
+  therm 2m               # watch for 2 minutes, then tell me what cooked it
+  therm 1h               # leave it running; ctrl-c anytime for the story so far
+  therm watch            # live dashboard
+EOF
+}
+
+# --- main ---
+main() {
+    [[ "$(uname -s)" == "Darwin" ]] || _die "therm is macOS-only (needs powermetrics)"
+    command -v powermetrics >/dev/null 2>&1 || _die "powermetrics not found — is this macOS?"
+
+    case "${1:-}" in
+        -h|--help|help) usage ;;
+        watch)          cmd_observe "" "session" ;;
+        raw)            cmd_raw "${2:-}" ;;
+        "")             cmd_snapshot ;;
+        *)
+            # an existing file path → render a saved capture (debugging / power use)
+            if [[ -f $1 ]]; then _render_file "$1" "saved"; return; fi
+            local secs
+            secs=$(_dur2sec "$1") || _die "unknown argument: $1  ${D}(try a duration like 40s, 2m, 1h — or --help)${X}"
+            [[ $secs -ge 1 ]] || _die "duration must be at least 1 second"
+            if [[ $secs -le $((TICK * 3)) ]]; then cmd_snapshot "$secs"     # too short to observe; just snapshot
+            else cmd_observe "$secs" "$1"
+            fi
+            ;;
+    esac
+}
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi

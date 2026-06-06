@@ -56,7 +56,7 @@ If the target file already exists, mint refuses to clobber it. Pass `-f` / `--fo
 | `--seed <str>` | Reproducible seed. Same seed + same flags = same output. Default is random. |
 | `--size <px>` | PNG render size, square (default `512`). |
 | `--padding <pct>` | Inset the artwork, as a percentage of the canvas (default `0`). Useful when something downstream adds its own padding. |
-| `--transparent` | Transparent background. mint switches to a 1–2 ink palette tuned for both dark and light surfaces. |
+| `--transparent` | Force a transparent background on every roll. By default ~70% of rolls are transparent already; pass this when you specifically want one. mint switches to a 1–2 ink palette tuned for both dark and light surfaces. |
 | `-f, --force` | Overwrite the destination if it already exists. |
 | `--preview` | Also write `preview.png` (6×6 grid of fresh rolls) and `preview-small.png` (10 true-16px renders, scaled up) next to the main output. Handy for checking how the icon survives at favicon size. |
 | `-h, --help` | Help. |
@@ -67,13 +67,15 @@ Each run is a seeded pipeline:
 
 1. **Seed → RNG.** `--seed` (or `date +%s%N$$` if unset) becomes an integer via `cksum` and is loaded into bash's `$RANDOM`. Subsequent rolls — colours, shapes, layout — all derive from that one stream, so the same seed gives the same icon byte-for-byte.
 
-2. **Colour mode.** With a fresh background the roll picks one of `mono` (single ink, 4.5+ contrast), `duo` (two inks against one of five tuned backgrounds), or `palette` (one of 30 hand-built 3-colour combos). With `--transparent`, mint forces a smaller pool of inks that have ≥2.5 contrast against *both* white and black so the icon survives on either surface.
+2. **Colour mode.** Each roll picks one of four modes: `transparent` (~70%, 1–2 inks tuned to survive on both light and dark surfaces), `mono` (single ink, 4.5+ contrast against a tuned bg), `duo` (two inks on a tuned bg), or `palette` (one of 30 hand-built 3-colour combos). `--transparent` forces the transparent mode every roll.
 
 3. **Shape and composition.** mint picks one of 28 weighted styles. Single big shapes are weighted 4× — they read better at 16px than busy compositions. The pool covers single primitives (circle, ring, rounded square, diamond, hex, octagon, 4/5/8-pt stars, droplet, heart, lightning, chevron, capsule, plus), repetition layouts (pairs, triads, 2×2 and 3×3 grids, diagonals), and compositional styles (diagonal split, two arcs, quadrants, ring-with-dot, masked cuts, sunburst, pie slice, bars, arch, half disc).
 
-4. **SVG → PNG.** mint emits a 100×100 viewBox SVG to a tmp file, then `rsvg-convert -w $SIZE -h $SIZE` rasterises it to your destination.
+4. **Frame.** Bg-coloured rolls get an iOS-style rounded-square frame: bg + content are clipped to a `rx=22%` rounded rect so inner shapes that hit the canvas edges (quadrants, bars, diagonal splits) follow the corner curve. Transparent rolls stay sharp — clipping a triangle or quadrant composition to a rounded rect would clip its inherent silhouette.
 
-Everything that needs floating-point math goes through `awk` — bash 3.2 only has integer arithmetic. WCAG contrast ratios use the standard relative-luminance formula so the colour picker can reject low-contrast combinations.
+5. **SVG → PNG.** mint emits a 100×100 viewBox SVG to a tmp file, then `rsvg-convert -w $SIZE -h $SIZE` rasterises it to your destination.
+
+Everything that needs floating-point math goes through `awk` — bash 3.2 only has integer arithmetic. The RNG is a Numerical Recipes LCG with state in a temp file, because bash 3.2 reseeds `$RANDOM` per subshell and the script's helpers all run via `$(...)`. WCAG contrast ratios use the standard relative-luminance formula so the colour picker can reject low-contrast combinations.
 
 ### What's deliberately not in the pool
 

@@ -44,7 +44,7 @@ ${C}Options:${X}
       --seed <str>     Reproducible seed (default: random)
       --size <px>      PNG render size in pixels (default: 512)
       --padding <pct>  Inset the shape, as % of canvas (default: 0)
-      --transparent    Transparent background
+      --transparent    Force a transparent background (default: ~70% of rolls)
   -f, --force          Overwrite the destination if it already exists
       --preview        Also write preview.png (6×6 grid) + preview-small.png (16px strip)
   -h, --help           Show this help
@@ -54,7 +54,7 @@ ${C}Examples:${X}
   mint ~/Desktop                    # → ~/Desktop/favicon.png
   mint ~/icons/logo                 # → ~/icons/logo.png
   mint --size 1024 --padding 10     # bigger render, 10% inset
-  mint --transparent                # transparent background
+  mint --transparent                # always-transparent background
   mint --preview                    # also writes preview grids alongside
 EOF
 }
@@ -100,36 +100,48 @@ OUT_DIR=$(dirname "$OUT_PATH")
 mkdir -p "$OUT_DIR"
 
 # --- dependency: rsvg-convert ---
-RSVG=""
-_detect_rsvg() { command -v rsvg-convert >/dev/null 2>&1 && RSVG="rsvg-convert" || RSVG=""; }
-_detect_rsvg
-
-_install_rsvg() {
+if ! command -v rsvg-convert >/dev/null 2>&1; then
   command -v brew >/dev/null 2>&1 || _die "rsvg-convert not found and Homebrew is missing — install librsvg manually"
   _info "installing librsvg via brew..."
   brew install librsvg
-  _detect_rsvg
-  [[ -n "$RSVG" ]] || _die "rsvg-convert still not on PATH after install"
-}
-[[ -z "$RSVG" ]] && _install_rsvg
+  command -v rsvg-convert >/dev/null 2>&1 || _die "rsvg-convert still not on PATH after install"
+fi
 
 # --- seeded RNG ---
-# bash $RANDOM is 15-bit (0..32767); we seed it once, then derive ranges via awk.
+# bash 3.2 (stock macOS) reseeds $RANDOM in subshells with a PID/time-derived
+# value, so any RNG that flows through `$(...)` is non-deterministic regardless
+# of how the parent seeded $RANDOM. We need state that survives subshells, so
+# the LCG state lives in a file and every random helper reads → advances → writes.
 if [[ -z "$SEED" ]]; then
     SEED="$(date +%s%N)$$"
-    SEED_INT=$((SEED % 2147483647))
-else
-    SEED_INT=$(printf '%s' "$SEED" | cksum | awk '{print $1}')
 fi
-RANDOM=$SEED_INT
+# Always derive SEED_INT from the SEED string the same way — otherwise
+# round-tripping (auto-gen seed printed → user re-passes it) produces a
+# different integer state and a different image.
+SEED_INT=$(printf '%s' "$SEED" | cksum | awk '{print $1}')
 
-rand()    { awk -v r="$RANDOM" 'BEGIN{printf "%.6f", r/32768}'; }
-randf()   { awk -v r="$RANDOM" -v a="$1" -v b="$2" 'BEGIN{printf "%.4f", a+(b-a)*r/32768}'; }
-randi()   { awk -v r="$RANDOM" -v a="$1" -v b="$2" 'BEGIN{printf "%d", a+int((b-a+1)*r/32768)}'; }
-pick_idx(){ randi 0 $(($1 - 1)); }
-chance()  { awk -v r=$(rand) -v p="$1" 'BEGIN{print (r<p)?1:0}'; }
-UID_COUNTER=0
-new_id()  { UID_COUNTER=$((UID_COUNTER + 1)); printf "id%d_%d" "$$" "$UID_COUNTER"; }
+TMPDIR_MINT=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_MINT"' EXIT
+RNG_FILE="$TMPDIR_MINT/rng"
+ID_FILE="$TMPDIR_MINT/idc"
+printf '%s\n' "$SEED_INT" > "$RNG_FILE"
+printf '0\n'              > "$ID_FILE"
+
+# Numerical Recipes LCG (a=1664525, c=1013904223, m=2^32). Bash 64-bit
+# arithmetic handles s*a+c without overflow (max ~7.2e15, fits in 63 bits).
+_next_state() {
+  local s
+  s=$(< "$RNG_FILE")
+  s=$(( (s * 1664525 + 1013904223) & 4294967295 ))
+  printf '%s\n' "$s" > "$RNG_FILE"
+  printf '%s' "$s"
+}
+rand()    { local s; s=$(_next_state); awk -v s="$s" 'BEGIN{printf "%.6f", s/4294967296}'; }
+randf()   { local s; s=$(_next_state); awk -v s="$s" -v a="$1" -v b="$2" 'BEGIN{printf "%.4f", a+(b-a)*s/4294967296}'; }
+randi()   { local s a b; s=$(_next_state); a=$1; b=$2; printf '%d' $(( a + s % (b - a + 1) )); }
+pick_idx(){ local s; s=$(_next_state); printf '%d' $(( s % $1 )); }
+chance()  { local r; r=$(rand); awk -v r="$r" -v p="$1" 'BEGIN{print (r<p)?1:0}'; }
+new_id()  { local n; n=$(< "$ID_FILE"); n=$((n + 1)); printf '%s\n' "$n" > "$ID_FILE"; printf 'id_%d' "$n"; }
 
 # --- WCAG contrast ---
 contrast_ratio() {
@@ -216,37 +228,43 @@ pick_ink_with_contrast() {
   else printf -v "$_var" '%s' "#dc2626"; fi
 }
 
+# Bright/vivid pool for transparent rolls — pre-curated for legibility on
+# dark surfaces. The old filter (≥2.5 contrast vs *both* white and black)
+# pinned ink luminance to roughly [0.075, 0.37] — every passing colour was a
+# mid-dark, which is exactly what gets lost on a dark UI. Saturated brights
+# (lum ~0.4–0.85) read clearly on dark and stay distinguishable on light.
+INKS_BRIGHT=(
+  "#f97316" "#fb923c" "#ef4444" "#f43f5e" "#ec4899" "#f472b6" "#fb7185"
+  "#facc15" "#fde047" "#fbbf24"
+  "#22c55e" "#4ade80" "#84cc16" "#10b981"
+  "#06b6d4" "#22d3ee" "#0ea5e9" "#3b82f6" "#60a5fa"
+  "#a855f7" "#c026d3" "#d946ef" "#e879f9"
+  "#00ff88" "#00ffff" "#ff0080" "#ff6ec7"
+)
+
 pick_ink_safe_for_transparent() {
   local _var="$1"
-  local attempts=0
-  while (( attempts < 40 )); do
-    local cand="${INKS[$(pick_idx ${#INKS[@]})]}"
-    local cw cb
-    cw=$(has_contrast "$cand" "#ffffff" 2.5)
-    cb=$(has_contrast "$cand" "#000000" 2.5)
-    if [[ "$cw" -eq 1 && "$cb" -eq 1 ]]; then
-      printf -v "$_var" '%s' "$cand"; return
-    fi
-    attempts=$((attempts+1))
-  done
-  printf -v "$_var" '%s' "#dc2626"
+  printf -v "$_var" '%s' "${INKS_BRIGHT[$(pick_idx ${#INKS_BRIGHT[@]})]}"
 }
 
 # Sets globals BG, INK1, INK2, NUM_INKS based on a weighted random mode.
+# Transparent is the dominant default (~70%) — most compositions read better
+# without a coloured frame. --transparent forces it always.
 pick_colors() {
   local mode
   if [[ "$TRANSPARENT" -eq 1 ]]; then
-    mode="transparent_2"
+    mode="transparent"
   else
     local roll; roll=$(rand)
-    if   awk -v r="$roll" 'BEGIN{exit !(r<0.30)}'; then mode="mono"
-    elif awk -v r="$roll" 'BEGIN{exit !(r<0.65)}'; then mode="duo"
+    if   awk -v r="$roll" 'BEGIN{exit !(r<0.70)}'; then mode="transparent"
+    elif awk -v r="$roll" 'BEGIN{exit !(r<0.80)}'; then mode="mono"
+    elif awk -v r="$roll" 'BEGIN{exit !(r<0.90)}'; then mode="duo"
     else mode="palette"
     fi
   fi
 
   case "$mode" in
-    transparent_2)
+    transparent)
       pick_ink_safe_for_transparent INK1
       if [[ $(chance 0.5) -eq 1 ]]; then
         pick_ink_safe_for_transparent INK2
@@ -679,7 +697,7 @@ style_intersect_lens() {
   local c2="$INK1"
   [[ "$NUM_INKS" -ge 2 ]] && c2="$INK2"
   printf '<circle cx="%s" cy="%s" r="36" fill="%s"/>' "$cx2" "$cy2" "$c2"
-  if [[ "$TRANSPARENT" -eq 0 ]]; then
+  if [[ "$BG" != "transparent" ]]; then
     printf '<g clip-path="url(#%s)"><circle cx="%s" cy="%s" r="36" fill="%s"/></g>' "$id" "$cx2" "$cy2" "$BG"
   fi
 }
@@ -701,7 +719,7 @@ style_sunburst() {
     }
   }'
   printf '</g>'
-  if [[ "$TRANSPARENT" -eq 0 ]]; then
+  if [[ "$BG" != "transparent" ]]; then
     printf '<circle cx="50" cy="50" r="14" fill="%s"/>' "$BG"
   fi
 }
@@ -768,15 +786,15 @@ ALL_STYLES=(
 )
 
 # --- compose ---
+# Corner radius (% of canvas) for bg-coloured outputs. ~22 matches the visual
+# weight of a modern app icon. Transparent rolls stay sharp — clipping a triangle
+# or quadrant composition to a rounded rect would clip its inherent silhouette.
+ROUNDED_RX=22
+
 make_svg() {
   pick_colors
   local style="${ALL_STYLES[$(pick_idx ${#ALL_STYLES[@]})]}"
   local inner; inner=$("$style")
-
-  local bg_rect=""
-  if [[ "$TRANSPARENT" -eq 0 && "$BG" != "transparent" ]]; then
-    bg_rect="<rect width=\"100\" height=\"100\" fill=\"$BG\"/>"
-  fi
 
   local content="$inner"
   if [[ "$PADDING" -gt 0 ]]; then
@@ -785,16 +803,21 @@ make_svg() {
     content="<g transform=\"translate($pad $pad) scale($inner_size)\">$inner</g>"
   fi
 
-  printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">%s%s</svg>' "$bg_rect" "$content"
+  if [[ "$BG" == "transparent" ]]; then
+    printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">%s</svg>' "$content"
+  else
+    # Clip bg + content together — inner shapes (quadrants, bars, diagonal
+    # splits) extend to the canvas edges and would visibly overflow the rounded
+    # corners if only the bg rect were rounded.
+    local cid; cid=$(new_id)
+    printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><clipPath id="%s"><rect width="100" height="100" rx="%s" ry="%s"/></clipPath></defs><g clip-path="url(#%s)"><rect width="100" height="100" fill="%s"/>%s</g></svg>' \
+      "$cid" "$ROUNDED_RX" "$ROUNDED_RX" "$cid" "$BG" "$content"
+  fi
 }
 
 # --- render ---
-TMPDIR_MINT=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_MINT"' EXIT
-
-SVG_TMP="$TMPDIR_MINT/out.svg"
-make_svg > "$SVG_TMP"
-rsvg-convert -w "$SIZE" -h "$SIZE" "$SVG_TMP" -o "$OUT_PATH"
+# Pipe SVG straight into rsvg-convert — no SVG ever touches disk.
+make_svg | rsvg-convert -w "$SIZE" -h "$SIZE" -o "$OUT_PATH"
 
 _ok "${B}${OUT_PATH}${X}  ${D}seed:${X} ${W}$SEED${X}"
 
@@ -804,7 +827,7 @@ if [[ "$PREVIEW" -eq 1 ]]; then
   PREVIEW_STRIP="$OUT_DIR/preview-small.png"
 
   {
-    echo '<svg xmlns="http://www.w3.org/2000/svg" width="768" height="768" viewBox="0 0 768 768"><rect width="768" height="768" fill="#e5e5e5"/>'
+    echo '<svg xmlns="http://www.w3.org/2000/svg" width="768" height="768" viewBox="0 0 768 768"><rect width="768" height="384" fill="#e5e5e5"/><rect y="384" width="768" height="384" fill="#171717"/>'
     for i in $(seq -w 0 35); do
       idx=$((10#$i)); col=$((idx % 6)); row=$((idx / 6))
       x=$((col * 128)); y=$((row * 128))
@@ -813,24 +836,23 @@ if [[ "$PREVIEW" -eq 1 ]]; then
       echo "<svg x=\"$x\" y=\"$y\" width=\"128\" height=\"128\" viewBox=\"0 0 100 100\">$inner</svg>"
     done
     echo '</svg>'
-  } > "$TMPDIR_MINT/grid.svg"
-  rsvg-convert -w 768 -h 768 "$TMPDIR_MINT/grid.svg" -o "$PREVIEW_GRID"
+  } | rsvg-convert -w 768 -h 768 -o "$PREVIEW_GRID"
 
+  # 16px PNG intermediates are required — the strip embeds them as <image> and
+  # scales up with `image-rendering: pixelated` to show what the icon looks like
+  # at favicon size. Rendering directly at 128px would defeat that.
   for i in $(seq 0 9); do
-    tile=$(make_svg)
-    echo "$tile" > "$TMPDIR_MINT/sm_$i.svg"
-    rsvg-convert -w 16 -h 16 "$TMPDIR_MINT/sm_$i.svg" -o "$TMPDIR_MINT/sm_${i}_16.png"
+    make_svg | rsvg-convert -w 16 -h 16 -o "$TMPDIR_MINT/sm_${i}_16.png"
   done
   {
-    echo '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="128" viewBox="0 0 1280 128" style="image-rendering: pixelated"><rect width="1280" height="128" fill="#e5e5e5"/>'
+    echo '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="128" viewBox="0 0 1280 128" style="image-rendering: pixelated"><rect width="640" height="128" fill="#e5e5e5"/><rect x="640" width="640" height="128" fill="#171717"/>'
     for i in $(seq 0 9); do
       x=$((i * 128))
-      b64=$(base64 "$TMPDIR_MINT/sm_${i}_16.png" | tr -d '\n')
+      b64=$(base64 < "$TMPDIR_MINT/sm_${i}_16.png" | tr -d '\n')
       echo "<image x=\"$x\" y=\"0\" width=\"128\" height=\"128\" href=\"data:image/png;base64,$b64\" style=\"image-rendering: pixelated\"/>"
     done
     echo '</svg>'
-  } > "$TMPDIR_MINT/sm_final.svg"
-  rsvg-convert -w 1280 -h 128 "$TMPDIR_MINT/sm_final.svg" -o "$PREVIEW_STRIP"
+  } | rsvg-convert -w 1280 -h 128 -o "$PREVIEW_STRIP"
 
   _ok "${B}${PREVIEW_GRID}${X}        ${D}6×6 grid${X}"
   _ok "${B}${PREVIEW_STRIP}${X}  ${D}true 16px renders, scaled up${X}"
