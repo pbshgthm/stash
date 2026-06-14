@@ -23,6 +23,9 @@ curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash 
 
 # mint — random favicon generator
 curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s mint
+
+# decal — custom app icons that survive updates
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s decal
 ```
 
 Each invocation drops `~/.local/bin/<tool>`. If `~/.local/bin` isn't on your `PATH`, the installer prints the exact line to drop in your shell rc.
@@ -32,6 +35,7 @@ Each invocation drops `~/.local/bin/<tool>`. If `~/.local/bin` isn't on your `PA
 - [`loco`](./tools/loco/README.md) — make any project a local domain in two seconds
 - [`pluck`](./tools/pluck/README.md) — github file downloader
 - [`mint`](./tools/mint/README.md) — random favicon generator
+- [`decal`](./tools/decal/README.md) — custom app icons that survive updates
 
 ## per-tool setup
 

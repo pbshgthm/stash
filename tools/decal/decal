@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# decal — a folder of <App>.icns files, applied to /Applications/<App>.app.
+# macOS app updates (brew casks, Sparkle self-updaters) replace the bundle and
+# wipe custom icons. decal keeps your icons in one folder and re-applies them on
+# demand: drop an <App>.icns into the icons dir (or `decal add`), then run `decal`.
+
+# --- style ---
+if [[ -t 1 ]]; then
+    B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
+    C=$'\033[36m' W=$'\033[37m' X=$'\033[0m'
+else
+    B= D= G= R= C= W= X=
+fi
+_ok()   { printf '%s\n' "${G}ok${X}  ${D}$*${X}"; }
+_err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
+_info() { printf '%s\n' "${D}$*${X}"; }
+_die()  { _err "$*"; exit 1; }
+_yes()  { [[ $1 =~ ^[Yy]([Ee][Ss])?$ ]]; }   # bash-3.2 safe (no ${var,,})
+
+shopt -s nullglob   # an empty icons dir should expand to nothing, not a literal glob
+
+# --- paths (XDG) ---
+ICON_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/decal/icons"   # drop <App>.icns here
+SYMLINK_PATH="${XDG_BIN_HOME:-$HOME/.local/bin}/decal"
+
+# --- helpers ---
+_need_fileicon() {
+    command -v fileicon >/dev/null 2>&1 && return 0
+    command -v brew >/dev/null 2>&1 || _die "fileicon not found and Homebrew is missing — install fileicon manually"
+    _info "installing fileicon via brew..."
+    brew install fileicon
+    command -v fileicon >/dev/null 2>&1 || _die "fileicon still not on PATH after install"
+}
+
+# "App", "App.app", or "/path/App.app" -> bare app name
+_appname() { local n; n="$(basename "$1")"; printf '%s' "${n%.app}"; }
+
+# find an app by name in the standard locations
+_findapp() {  # name -> app path, or nothing
+    if   [[ -d "/Applications/$1.app" ]];      then printf '%s' "/Applications/$1.app"
+    elif [[ -d "$HOME/Applications/$1.app" ]]; then printf '%s' "$HOME/Applications/$1.app"
+    fi
+}
+
+# set an icon, turning macOS's TCC denial into an actionable hint
+_set_icon() {  # app icns
+    local app="$1" icns="$2" out
+    if out=$(fileicon set "$app" "$icns" 2>&1); then touch "$app" 2>/dev/null || true; return 0; fi
+    if printf '%s' "$out" | grep -qiE 'permission|not permitted'; then
+        _err "macOS blocked changing $(basename "$app")'s icon"
+        _info "  enable your terminal under System Settings → Privacy & Security → App Management, then retry."
+        _info "  (a background process can't do this — it must be your interactive terminal.)"
+    else
+        _err "$out"
+    fi
+    return 1
+}
+
+# --- commands ---
+cmd_add() {
+    local app_arg="${1:-}" icns="${2:-}" name app
+    [[ -n "$app_arg" && -n "$icns" ]] || { _err "usage: decal add <app> <icns>"; _info "  e.g. decal add Ghostty ~/Downloads/cool.icns"; return 1; }
+    [[ -f "$icns" ]] || _die "no such icon file: $icns"
+    name="$(_appname "$app_arg")"
+    app="$(_findapp "$name")"
+    [[ -n "$app" ]] || _die "can't find ${name}.app in /Applications or ~/Applications"
+    _need_fileicon
+    mkdir -p "$ICON_DIR"
+    cp -f "$icns" "$ICON_DIR/$name.icns"   # decal keeps its own copy — the source path no longer matters
+    _set_icon "$app" "$ICON_DIR/$name.icns" || return 1
+    killall Dock >/dev/null 2>&1 || true
+    _ok "set + saved ${B}$name${X}  ${D}(${ICON_DIR/#$HOME/~}/$name.icns)${X}"
+}
+
+cmd_rm() {
+    local app_arg="${1:-}" name app
+    [[ -n "$app_arg" ]] || { _err "usage: decal rm <app>"; return 1; }
+    name="$(_appname "$app_arg")"
+    [[ -f "$ICON_DIR/$name.icns" ]] || _die "not tracked: $name  (run: decal ls)"
+    app="$(_findapp "$name")"
+    if [[ -n "$app" ]] && command -v fileicon >/dev/null 2>&1; then fileicon rm "$app" >/dev/null 2>&1 || true; fi
+    rm -f "$ICON_DIR/$name.icns"
+    killall Dock >/dev/null 2>&1 || true
+    _ok "removed ${B}$name${X} (restored default icon)"
+}
+
+cmd_ls() {
+    local f name app status any=1
+    if [[ -d "$ICON_DIR" ]]; then
+        for f in "$ICON_DIR"/*.icns; do
+            any=0; name="$(basename "${f%.icns}")"; app="$(_findapp "$name")"
+            if   [[ -z "$app" ]]; then status="${R}● no app${X}"
+            elif command -v fileicon >/dev/null 2>&1 && fileicon test "$app" >/dev/null 2>&1; then status="${G}● set${X}"
+            else status="${D}○ not set${X}"; fi
+            printf '  %s%-26s%s %s\n' "$B" "$name" "$X" "$status"
+        done
+    fi
+    if [[ $any -ne 0 ]]; then
+        _info "no icons yet — drop an <App>.icns into:"
+        printf '    %s%s%s\n' "$C" "${ICON_DIR/#$HOME/~}" "$X"
+        _info "  or: decal add <app> <icns>"
+    fi
+}
+
+cmd_apply() {
+    local files=( "$ICON_DIR"/*.icns )
+    [[ ${#files[@]} -gt 0 ]] || { _info "no icons yet — decal add <app> <icns>, or drop files in ${ICON_DIR/#$HOME/~}"; return 0; }
+    _need_fileicon
+    local f name app ok=0 skip=0 fail=0
+    for f in "${files[@]}"; do
+        name="$(basename "${f%.icns}")"; app="$(_findapp "$name")"
+        if [[ -z "$app" ]]; then _err "skip $name (no $name.app found)"; skip=$((skip+1)); continue; fi
+        if fileicon test "$app" >/dev/null 2>&1; then _info "ok    $name (already set)"; ok=$((ok+1)); continue; fi
+        if _set_icon "$app" "$f"; then _ok "applied ${B}$name${X}"; ok=$((ok+1)); else fail=$((fail+1)); fi
+    done
+    killall Dock >/dev/null 2>&1 || true
+    _info "done — $ok ok, $skip skipped, $fail failed"
+    [[ $fail -eq 0 ]]
+}
+
+cmd_teardown() {
+    local root="${ICON_DIR%/icons}"
+    printf '%sdecal teardown%s will restore default icons, delete %s, and remove %s.\n' "$B" "$X" "${root/#$HOME/~}" "${SYMLINK_PATH/#$HOME/~}"
+    printf 'Continue? [y/N] '
+    local ans=""; read -r ans || true
+    _yes "${ans:-n}" || { _info "aborted — nothing changed"; return 0; }
+    if [[ -d "$ICON_DIR" ]] && command -v fileicon >/dev/null 2>&1; then
+        local f name app
+        for f in "$ICON_DIR"/*.icns; do
+            name="$(basename "${f%.icns}")"; app="$(_findapp "$name")"
+            [[ -n "$app" ]] && fileicon rm "$app" >/dev/null 2>&1 || true
+        done
+    fi
+    rm -rf "$root"
+    rm -f "$SYMLINK_PATH"
+    killall Dock >/dev/null 2>&1 || true
+    _ok "decal removed; app icons restored to default"
+}
+
+usage() {
+    printf '\n'
+    printf '%s%s' "$B" "$C"
+    cat <<'BANNER'
+  _________                 ______
+  ______  /________________ ___  /
+  _  __  /_  _ \  ___/  __ `/_  /
+  / /_/ / /  __/ /__ / /_/ /_  /
+  \__,_/  \___/\___/ \__,_/ /_/
+BANNER
+    printf '%s\n' "$X"
+    cat <<EOF
+  ${B}decal${X} ${D}— custom app icons that survive updates${X}
+
+${C}How it works:${X}
+  Keep your ${B}<App>.icns${X} files in one folder; decal sets each onto the
+  matching /Applications/<App>.app. Updates wipe custom icons — rerun ${B}decal${X}.
+
+${C}Usage:${X}
+  decal                   apply every saved icon  ${D}(the default)${X}
+  decal add <app> <icns>  import an icon (copied in — source path can be anywhere) + set it
+  decal rm <app>          remove the icon, restore the app's default
+  decal ls                list saved icons + live status
+  decal teardown          restore all, delete the folder + symlink
+  decal help              show this
+
+${C}Drag-and-drop:${X}
+  Drop an ${B}<App>.icns${X} (named exactly like the app) into
+    ${C}~/.config/decal/icons/${X}
+  then run ${B}decal${X}.
+
+${C}Notes:${X}
+  Wraps ${B}fileicon${X} (auto-installed via brew). macOS forbids ${D}background${X}
+  processes from changing app icons, so decal is run-it-yourself; if it reports
+  "App Management", enable your terminal in System Settings → Privacy & Security.
+
+${C}Examples:${X}
+  decal add Ghostty ~/Downloads/ghostty-cool.icns
+  decal                   ${D}# after Ghostty self-updates and drops the icon${X}
+EOF
+}
+
+# --- main ---
+case "${1:-apply}" in
+    add)            shift; cmd_add "$@" ;;
+    rm)             shift; cmd_rm "$@" ;;
+    ls|list)        cmd_ls ;;
+    apply|"")       cmd_apply ;;
+    teardown)       cmd_teardown ;;
+    help|-h|--help) usage ;;
+    *)              _err "unknown command: ${1:-}"; _info "  run: decal help"; exit 1 ;;
+esac

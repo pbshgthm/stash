@@ -30,7 +30,7 @@ _die()  { _err "$*"; exit 1; }
 TOOL="${1:-}"
 if [[ -z "$TOOL" ]]; then
     _err "usage: install <tool>"
-    _info "  available: loco, pluck, mint"
+    _info "  available: loco, pluck, mint, decal"
     exit 1
 fi
 
