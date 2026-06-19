@@ -1,25 +1,25 @@
-# utils — conventions for self-contained CLI tools
+# AGENTS
 
-This directory holds small, self-contained CLI tools. Each tool is a single bash script with a specific, narrow purpose. `loco` (local dev domains) and `pluck` (GitHub downloader) are the reference implementations — match their shape when adding a new util.
+Conventions for anyone — human or agent — adding to or changing tools in this repo. **stash** is a set of single-file bash CLI tools for macOS; each lives at `tools/<name>/<name>` with a sibling `README.md`. These rules keep every tool consistent, hackable, and dependency-free — follow them. `loco` and `pluck` are the reference implementations; match their shape.
 
 ## Core principles
 
-- **One bash script per tool.** No Python, no Node, no build step. Bash keeps the tool hackable on any Unix box and removes runtime dependencies. If the logic needs more than bash, the tool is too big to live here — spin it out.
-- **Single file, no extension.** `loco`, not `loco.sh`. The shebang tells the OS what it is; users type the name without `.sh`.
-- **Every tool has a sibling `<name>.md`.** The script carries terse inline `--help`; the markdown is the longer-form reference — what it is, why it exists, how it works internally, edge cases, troubleshooting. Users read the `.md` when browsing the repo; the `--help` when they're in-flight. See `loco.md` and `pluck.md`.
-- **Self-installing, self-removing.** Tools that touch the system (bin symlinks, LaunchDaemons, config dirs) must install themselves via `init` and undo everything via `teardown`. No orphaned state after `teardown`.
-- **Short, memorable names.** Prefer ≤6 characters. Single lowercase word. Pronounceable. `loco`, `pluck` — not `devnet`, `gitgrab`, `system-monitor-tool`.
+- **One bash script per tool.** No Python, no Node, no build step. Bash keeps the tool hackable on any Unix box with zero runtime deps. If the logic outgrows bash, it's too big to live here — spin it out.
+- **Single file, no extension.** `loco`, not `loco.sh`. The shebang says what it is; users type the bare name.
+- **Every tool has a sibling `<name>.md`.** The script carries terse inline `--help`; the markdown is the longer reference — what it is, why it exists, how it works, edge cases, troubleshooting.
+- **Self-installing, self-removing.** A tool that touches the system (bin entry, LaunchDaemons, config dirs) installs itself via `init` and undoes everything via `teardown`. Nothing left behind.
+- **Short, memorable names.** ≤6 characters, one lowercase word, pronounceable. `loco`, `pluck` — not `devnet`, `gitgrab`.
 
 ## Shared style kit
 
-Every script starts with this. Copy verbatim — consistency across tools is the point.
+Every script starts with this — copy verbatim; consistency is the point.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
 # --- style ---
-if [[ -t 1 ]]; then                       # use -t 2 for tools whose result goes on stdout and status on stderr (e.g. pluck)
+if [[ -t 1 ]]; then                       # use -t 2 for tools whose result goes on stdout (e.g. pluck)
     B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
     C=$'\033[36m' W=$'\033[37m' X=$'\033[0m'
 else
@@ -33,37 +33,34 @@ _die()  { _err "$*"; exit 1; }
 _yes()  { [[ $1 =~ ^[Yy]([Ee][Ss])?$ ]]; }   # prompt-response helper, bash-3.2 safe
 ```
 
-**Why `$'\033[…m'`?** ANSI-C quoting makes the vars hold real escape bytes, so plain `echo "$B…"` or `printf '%s\n' "…"` works. Avoids the `echo -e` portability trap.
+- **`$'\033[…m'`** (ANSI-C quoting) stores real escape bytes, so a plain `printf '%s'` works — no `echo -e` portability trap.
+- **The TTY guard** strips colors when output is piped, so downstream tools never see escape codes.
+- **`_yes` instead of `${var,,}`:** stock macOS ships bash 3.2. Avoid `${var,,}`, `declare -A`, `mapfile`, and other bash-4 features — every script must run on vanilla macOS bash.
 
-**Why the TTY guard?** Strips colors when output is piped — downstream tools shouldn't see escape codes.
+## Naming & identifiers
 
-**Why `_yes` instead of `${var,,}`?** Stock macOS ships bash 3.2; `${var,,}` is bash 4+. Every script here must run on vanilla macOS. Avoid `${var,,}`, `declare -A`, `mapfile`, and other bash-4 features.
-
-## Naming
-
-- Lowercase, no dashes, no extension. `loco`, `pluck`.
-- Tool lives at `utils/<name>`, symlinks to `~/.local/bin/<name>`.
-- Internal identifiers derive from the tool name: `CONFIG_DIR=~/.config/<name>`, `PLIST_LABEL=com.<name>.<service>`, `SYMLINK_PATH=~/.local/bin/<name>`.
+- Lowercase, no dashes, no extension: `loco`, `pluck`.
+- Tool lives at `tools/<name>/<name>`; installs (copies) to `~/.local/bin/<name>`.
+- Internal identifiers derive from the name: `CONFIG_DIR=~/.config/<name>`, `PLIST_LABEL=com.<name>.<service>`, `BIN_PATH=~/.local/bin/<name>`.
 
 ## File locations (XDG)
 
-Anything a tool persists lives under XDG-standard paths:
+Anything a tool persists lives under XDG paths (use `${XDG_CONFIG_HOME:-$HOME/.config}` etc. so user overrides are respected):
 
 ```
-~/.config/<name>/          # user config; preserved across teardown unless user opts in to delete
+~/.config/<name>/          # user config; kept across teardown unless the user opts to delete
 ~/.local/state/<name>/     # logs, runtime state; removed by teardown
 ~/.local/share/<name>/     # caches, app data; removed by teardown
-~/.local/bin/<name>        # the symlink to the script; removed by teardown
+~/.local/bin/<name>        # the installed copy; removed by teardown
 ```
 
-Use `${XDG_CONFIG_HOME:-$HOME/.config}` etc. so the paths respect user overrides.
+Root-owned paths (system daemons):
 
-**Root-owned paths** (for system daemons):
-- `/Library/LaunchDaemons/com.<name>.<service>.plist` — install with `sudo install -m 644 -o root -g wheel`; launchd rejects user-owned plists in this dir. Remove with `sudo rm` in teardown.
+- `/Library/LaunchDaemons/com.<name>.<service>.plist` — install with `sudo install -m 644 -o root -g wheel` (launchd rejects user-owned plists here); remove with `sudo rm` in teardown.
 
-## Semantics — verbs
+## Command semantics
 
-**Registry tools** (tools that manage a named collection, like `loco` does for project mappings):
+**Registry tools** (manage a named collection, like `loco`'s project mappings):
 
 ```
 <tool> add <name> <args…>    # create or update (upsert)
@@ -71,28 +68,30 @@ Use `${XDG_CONFIG_HOME:-$HOME/.config}` etc. so the paths respect user overrides
 <tool> list | ls             # show all with status
 ```
 
-Do **not** use `set`/`unset` — those read like a config store, not a registry. `add`/`rm` matches the package-manager mental model.
+Use `add`/`rm` (the package-manager mental model), not `set`/`unset` (reads like a config store).
 
-**Service tools** (tools that manage a long-running daemon):
+**Service tools** (manage a long-running daemon):
 
 ```
-<tool> init                  # first-time install: bin symlink, plist, dirs, launch
-<tool> start                 # start the daemon
-<tool> stop                  # stop the daemon (disables auto-start until next 'start')
-<tool> status                # show service state + registry
-<tool> teardown              # full uninstall; interactive opt-ins for config and deps
-<tool> paths                 # list every file/dir the tool owns (for debugging)
+<tool> init        # first-time install: bin copy, plist, dirs, launch
+<tool> start       # start the daemon
+<tool> stop        # stop the daemon (disables auto-start until next 'start')
+<tool> status      # service state + registry
+<tool> teardown    # full uninstall; interactive opt-ins for config and deps
+<tool> paths       # every file/dir the tool owns (debugging)
 ```
 
-**One-shot tools** (no persistent state, single job — like `pluck`) stay flag-based:
+**One-shot tools** (no persistent state, single job, like `pluck`) stay flag-based:
 
 ```
 <tool> <required-arg> [options]
 ```
 
-## Self-install pattern
+## Install & self-install
 
-Any tool with an `init` subcommand self-symlinks. Resolve its own real path via a symlink walker — **not** `cd + pwd`, which only follows *directory* symlinks and leaves you pointing at the file symlink:
+**Installing is always a copy.** `install <tool>` (from GitHub or a clone) drops a standalone copy at `~/.local/bin/<tool>`. The installed command never depends on this repo — move, rename, or delete the clone and it keeps working. That independence is the whole point: a symlink back into the clone breaks the moment the clone moves.
+
+A tool with an `init` (service tools) places its own binary the same way. Resolve the script's real path with a symlink walker — **not** `cd + pwd`, which only follows *directory* symlinks — so `init` copies the true source whether it's run from the clone or from the already-installed copy:
 
 ```bash
 _resolve_script() {
@@ -106,60 +105,58 @@ _resolve_script() {
     printf '%s/%s' "$(cd -P "$(dirname "$src")" && pwd)" "$(basename "$src")"
 }
 SCRIPT_PATH="$(_resolve_script)"
-```
+BIN_PATH="$HOME/.local/bin/<name>"
 
-**Why this matters:** if a tool is invoked via its own symlink (`~/.local/bin/loco`) and naïvely recomputes `SCRIPT_PATH` from `BASH_SOURCE[0]`, it ends up being the symlink path itself. Then `ln -s $SCRIPT_PATH $SYMLINK_PATH` produces a self-loop → next invocation hits `ELOOP` → "too many levels of symbolic links." This bit us once; walk the symlinks.
+_ensure_installed() {
+    [[ "$SCRIPT_PATH" == "$BIN_PATH" ]] && return 0   # already the installed copy — no-op
+    rm -f "$BIN_PATH"                                  # replace a stale copy; never write through a symlink
+    install -m 755 "$SCRIPT_PATH" "$BIN_PATH"
+}
+```
 
 ## Teardown contract
 
-Every tool that writes to the system must have a `teardown` subcommand that:
+A tool that writes to the system must have a `teardown` that:
 
-1. Prints exactly what it's about to do, then asks `Continue? [y/N]`.
+1. Prints exactly what it will do, then asks `Continue? [y/N]`.
 2. Stops and unloads any launchd daemon (`launchctl bootout system/<label>`).
-3. Removes the plist, bin symlink, state dir, share dir.
-4. Asks **separately** before removing config (`~/.config/<name>/`) — users often want to keep their settings for a later re-install.
-5. Asks **separately** before uninstalling any package the tool's `init` installed (e.g. via brew).
-6. Prints what remains (the script file itself is never touched) and how to re-enable.
+3. Removes the plist, bin copy, state dir, share dir.
+4. Asks **separately** before removing config (`~/.config/<name>/`) — users often keep settings for a re-install.
+5. Asks **separately** before uninstalling any package `init` installed (e.g. via brew).
+6. Prints what remains and how to re-enable.
 
-Contract: after `teardown` with "yes" everywhere, the machine looks exactly as it did before `init`.
+After `teardown` with "yes" everywhere, the machine looks exactly as it did before `init`.
 
-## Help and output
+## Help & output
 
-- Open with an ASCII banner of the tool name, bold + cyan (`${B}${C}`), indented two spaces, generated with `figlet -f speed <name>`. Follow it with a blank line, then the indented tagline `  ${B}<tool>${X} ${D}— <one-line pitch>${X}`, another blank line, then the sections.
-- The banner goes inside a `<<'BANNER'` heredoc so backslashes and `$` stay literal. Mirror the same banner at the top of `<name>.md` in a fenced code block so the repo browsing view and `--help` feel like the same tool.
-- Sections headed `${C}Section:${X}` (Setup, Projects, Options, Examples, …).
-- Examples are always the last section.
+- Open `--help` with an ASCII banner of the tool name, bold + cyan (`${B}${C}`), indented two spaces, from `figlet -f speed <name>` inside a `<<'BANNER'` heredoc (so `\` and `$` stay literal). Follow with a blank line, the tagline `  ${B}<tool>${X} ${D}— <pitch>${X}`, then the sections. Mirror the same banner atop `<name>.md`.
+- Sections headed `${C}Section:${X}` (Setup, Projects, Options, Examples…). Examples come last.
 - Status indicators: `${G}● active${X}` / `${D}○ idle${X}`; `${G}ok${X}` / `${R}error${X}` as line prefixes.
 - Column-aligned lists use `printf` with fixed widths, never `echo`.
-- For one-shot tools, progress/status messages go to **stderr** so `stdout` stays clean for piping the actual result.
+- One-shot tools send progress/status to **stderr** so `stdout` stays clean for piping the result.
 
 ## Error handling
 
 - `set -euo pipefail` in every script.
 - Fatal: `_die "message"` → stderr, exit 1.
-- Recoverable (wrong usage, missing arg): `_err "usage: …"; _info "  hint"; return 1`. The hint should tell the user exactly what to type next.
+- Recoverable (bad usage, missing arg): `_err "usage: …"; _info "  hint"; return 1` — the hint says exactly what to type next.
 - Don't `sudo` speculatively — only when the step actually needs root.
 
 ## Code comments
 
-- Explain **why**, never **what**. `# atomic write — survives crash mid-write` is useful; `# write to tmp then mv` just restates the code.
-- Section dividers (`# --- helpers ---`, `# --- commands ---`, `# --- main ---`) help readers jump around in a long script.
-- Leave a one-line note where a choice is non-obvious: bash 3.2 compat, ordering that matters, a macOS quirk. Future-you will not remember.
-- No multi-paragraph docstrings. Bash isn't the place for prose.
+- Explain **why**, never **what**. `# atomic write — survives a crash mid-write` earns its place; `# write to tmp then mv` just restates the code.
+- Section dividers (`# --- helpers ---`, `# --- commands ---`, `# --- main ---`) help navigation.
+- Note non-obvious choices: bash 3.2 compat, ordering that matters, a macOS quirk. No multi-paragraph docstrings — bash isn't the place for prose.
 
-## Checklist for a new util
-
-Before committing a new tool to this directory:
+## Checklist for a new tool
 
 - [ ] Single bash file, no extension, `chmod +x`.
-- [ ] Sibling `<name>.md` covering what it does, install, commands, how it works, teardown/uninstall, limitations.
-- [ ] Shebang `#!/usr/bin/env bash`, `set -euo pipefail`.
-- [ ] Style block + `_ok/_err/_info/_die` copied verbatim.
-- [ ] Name is short, lowercase, memorable.
-- [ ] If it touches the system: has `init` + `teardown`; teardown is interactive and complete.
-- [ ] If it self-installs: uses `_resolve_script`, not `cd + pwd`.
+- [ ] Sibling `<name>.md`: what it does, install, commands, how it works, teardown, limitations.
+- [ ] Shebang `#!/usr/bin/env bash`, `set -euo pipefail`, style kit copied verbatim.
+- [ ] Short, lowercase, memorable name.
+- [ ] Touches the system? Has `init` + an interactive, complete `teardown`.
+- [ ] Self-installs by **copying** (standalone, repo-independent); uses `_resolve_script`, not `cd + pwd`.
 - [ ] Runs on stock macOS bash 3.2 (no `${var,,}`, `declare -A`, `mapfile`).
-- [ ] Persists only under XDG paths; all root-owned paths removable via teardown.
-- [ ] `help` starts with a `figlet -f speed <name>` banner in bold cyan, then the tagline. Same banner at the top of `<name>.md`.
-- [ ] `help` is section-formatted; examples come last.
+- [ ] Persists only under XDG paths; every root-owned path removable via teardown.
+- [ ] `--help` opens with the `figlet -f speed <name>` banner; sections formatted; examples last.
 - [ ] Comments explain WHY, not WHAT.

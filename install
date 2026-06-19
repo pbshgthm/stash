@@ -5,13 +5,23 @@ set -euo pipefail
 #
 # usage:
 #   curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s <tool>
+#   curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s stash   # everything
 #   ./install <tool>     (when run from a local clone)
+#   ./install stash      (install every tool in the repo)
 #
-# Drops tools/<tool>/<tool> into ~/.local/bin/<tool>. After-install hints (e.g.
-# `loco init` for service tools) are tool-specific and live in each README.
+# Drops tools/<tool>/<tool> into ~/.local/bin/<tool>. The keyword `stash`
+# installs every tool. After-install hints (e.g. `loco init` for service tools)
+# are tool-specific and live in each README.
 
-REPO_RAW="https://raw.githubusercontent.com/pbshgthm/stash/main"
+REPO_SLUG="pbshgthm/stash"
+BRANCH="main"
+REPO_RAW="https://raw.githubusercontent.com/$REPO_SLUG/$BRANCH"
+API_TOOLS="https://api.github.com/repos/$REPO_SLUG/contents/tools?ref=$BRANCH"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+
+# `stash` is the repo name, reserved as the install-everything keyword. There is
+# no tools/stash, so it never shadows a real tool.
+ALL_KEYWORD="stash"
 
 # --- style ---
 if [[ -t 1 ]]; then
@@ -26,47 +36,128 @@ _err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
 _info() { printf '%s\n' "${D}$*${X}"; }
 _die()  { _err "$*"; exit 1; }
 
+# --- resolve our own location (empty when piped via curl | bash) ---
+# From a clone we copy the on-disk script — installs exactly what's in your tree
+# and works offline. Piped, BASH_SOURCE[0] isn't a real file, so SELF_DIR stays
+# empty and we fall through to downloading from GitHub.
+SELF_DIR=""
+self="${BASH_SOURCE[0]:-}"
+if [[ -n "$self" && -f "$self" ]]; then
+    while [[ -L "$self" ]]; do
+        t=$(readlink "$self")
+        [[ $t = /* ]] || t="$(cd -P "$(dirname "$self")" && pwd)/$t"
+        self=$t
+    done
+    SELF_DIR="$(cd -P "$(dirname "$self")" && pwd)"
+fi
+
+# --- helpers ---
+
+# Every tool name — from the clone if we have one (authoritative, no drift),
+# else from the GitHub contents API so `stash` works over curl | bash too.
+_all_tools() {
+    if [[ -n "$SELF_DIR" && -d "$SELF_DIR/tools" ]]; then
+        local d name
+        for d in "$SELF_DIR"/tools/*/; do
+            [[ -d "$d" ]] || continue
+            name=$(basename "$d")
+            [[ -f "$d/$name" ]] && printf '%s\n' "$name"   # only dirs with a matching script
+        done
+    elif command -v curl >/dev/null 2>&1; then
+        # contents API returns one JSON object per entry; pull each "name".
+        curl -fsSL "$API_TOOLS" 2>/dev/null \
+            | grep -Eo '"name": *"[^"]+"' | sed -E 's/"name": *"([^"]+)"/\1/'
+    fi
+}
+
+# Install a single tool. 0 on success, non-zero on failure — the caller decides
+# whether that's fatal (single install dies; batch install skips and continues).
+install_one() {
+    local tool="$1"
+    [[ "$tool" =~ ^[a-z][a-z0-9-]*$ ]] || { _err "invalid tool name: $tool"; return 1; }
+
+    local target="$BIN_DIR/$tool"
+
+    if [[ -n "$SELF_DIR" && -f "$SELF_DIR/tools/$tool/$tool" ]]; then
+        rm -f "$target"                        # replace any stale copy/symlink; don't write through it
+        install -m 755 "$SELF_DIR/tools/$tool/$tool" "$target" || { _err "install failed: $tool"; return 1; }
+        _ok "installed ${B}$tool${X}${D} (from clone)${X}"
+        return 0
+    fi
+
+    command -v curl >/dev/null 2>&1 || { _err "curl is required but not found in PATH"; return 1; }
+    local tmp="$target.tmp.$$"
+    if ! curl -fsSL "$REPO_RAW/tools/$tool/$tool" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        _err "couldn't fetch $tool — does tools/$tool/$tool exist?"
+        return 1
+    fi
+    chmod +x "$tmp"
+    mv -f "$tmp" "$target"                      # atomic; replaces a symlink without following it
+    _ok "installed ${B}$tool${X}"
+}
+
+_path_check() {
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *)
+            printf '\n'
+            printf '%sheads up:%s %s is not on your PATH\n' "$R" "$X" "$BIN_DIR"
+            _info "  add this to your shell rc (e.g. ~/.zshrc or ~/.bashrc):"
+            printf '\n    %sexport PATH="%s:$PATH"%s\n\n' "$C" "$BIN_DIR" "$X"
+            ;;
+    esac
+}
+
 # --- args ---
 TOOL="${1:-}"
 if [[ -z "$TOOL" ]]; then
-    _err "usage: install <tool>"
-    _info "  available: loco, pluck, mint, decal"
+    _err "usage: install <tool> | install $ALL_KEYWORD"
+    if [[ -n "$SELF_DIR" ]]; then
+        _info "  one tool: $(_all_tools | tr '\n' ' ')"
+    else
+        _info "  one tool, e.g.: loco, pluck, mint, decal, therm, wakey"
+    fi
+    _info "  everything: install $ALL_KEYWORD"
     exit 1
 fi
 
-# Block path tricks; tool names are short lowercase words by convention.
-[[ "$TOOL" =~ ^[a-z][a-z0-9-]*$ ]] || _die "invalid tool name: $TOOL"
-
-# --- preflight ---
-command -v curl >/dev/null 2>&1 || _die "curl is required but not found in PATH"
-
-# --- download ---
-mkdir -p "$BIN_DIR"
-target="$BIN_DIR/$TOOL"
-tmp="$target.tmp.$$"
-trap 'rm -f "$tmp"' EXIT
-
-raw_url="$REPO_RAW/tools/$TOOL/$TOOL"
-_info "fetching ${B}$TOOL${X}${D} → $target${X}"
-if ! curl -fsSL "$raw_url" -o "$tmp"; then
-    _die "couldn't fetch $raw_url — does the tool exist?"
+# Friendly nudge for the natural guess.
+if [[ "$TOOL" == "all" ]]; then
+    _die "no tool named 'all' — use 'install $ALL_KEYWORD' to install everything"
 fi
-chmod +x "$tmp"
-mv -f "$tmp" "$target"
 
-_ok "installed ${B}$TOOL${X}"
+mkdir -p "$BIN_DIR"
 
-# --- PATH check ---
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *)
-        printf '\n'
-        printf '%sheads up:%s %s is not on your PATH\n' "$R" "$X" "$BIN_DIR"
-        _info "  add this to your shell rc (e.g. ~/.zshrc or ~/.bashrc):"
-        printf '\n    %sexport PATH="%s:$PATH"%s\n\n' "$C" "$BIN_DIR" "$X"
-        ;;
-esac
+# --- install everything ---
+if [[ "$TOOL" == "$ALL_KEYWORD" ]]; then
+    tools=$(_all_tools || true)
+    [[ -n "$tools" ]] || _die "couldn't determine the tool list (need a clone or network access)"
 
-# --- next steps ---
+    ok=0 fail=0 done_list=""
+    while IFS= read -r t; do
+        [[ -z "$t" ]] && continue
+        if install_one "$t"; then
+            ok=$((ok + 1)); done_list+=" $t"
+        else
+            fail=$((fail + 1))
+        fi
+    done <<<"$tools"
+
+    printf '\n'
+    if (( fail == 0 )); then
+        _ok "installed all $ok tools:${done_list}"
+    else
+        _err "installed $ok, ${R}failed $fail${X} (see above)"
+    fi
+    _path_check
+    printf '\n'
+    _info "next: run ${B}<tool> --help${X} for any of them (service tools like loco also need 'loco init')"
+    exit 0
+fi
+
+# --- install one ---
+install_one "$TOOL" || exit 1
+_path_check
 printf '\n'
 _info "next: ${B}$TOOL --help${X}"

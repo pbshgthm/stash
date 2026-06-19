@@ -17,10 +17,10 @@ _err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
 _info() { printf '%s\n' "${D}$*${X}" >&2; }
 _die()  { _err "$*"; exit 1; }
 
-# --- usage ---
-usage() {
-  printf '\n'
-  printf '%s%s' "$B" "$C"
+# --- banner ---
+# bold-cyan figlet banner (speed font); shown atop --help.
+_banner() {
+  printf '\n%s%s' "$B" "$C"
   cat <<'BANNER'
              _____       _____
   _______ ______(_)________  /_
@@ -28,8 +28,14 @@ usage() {
   _  / / / / /  / _  / / / /_
   /_/ /_/ /_//_/  /_/ /_/\__/
 BANNER
-  printf '%s\n' "$X"
+  printf '%s' "$X"
+}
+
+# --- usage ---
+usage() {
+  _banner
   cat <<EOF
+
   ${B}mint${X} ${D}— generate a random favicon (PNG)${X}
 
 ${C}Usage:${X}

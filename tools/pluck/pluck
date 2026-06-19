@@ -126,9 +126,10 @@ _summary() {
     } >&2
 }
 
-usage() {
-  printf '\n'
-  printf '%s%s' "$B" "$C"
+# --- banner ---
+# bold-cyan figlet banner (speed font); shown atop --help.
+_banner() {
+  printf '\n%s%s' "$B" "$C"
   cat <<'BANNER'
           ______            ______
   ___________  /___  __________  /__
@@ -137,8 +138,13 @@ usage() {
   _  .___//_/  \__,_/ \___/ /_/|_|
   /_/
 BANNER
-  printf '%s\n' "$X"
+  printf '%s' "$X"
+}
+
+usage() {
+  _banner
   cat <<EOF
+
   ${B}pluck${X} ${D}— download a file, folder, or repo from a git host URL, without .git${X}
 
 ${C}Usage:${X}

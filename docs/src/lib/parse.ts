@@ -1,5 +1,5 @@
 // Pull the figlet banner and tagline out of a util's markdown body.
-// Convention (per CLAUDE.md): the file opens with `# name`, then a fenced
+// Convention (see AGENTS.md): the file opens with `# name`, then a fenced
 // code block holding the banner, then a paragraph beginning with `**...**`.
 
 export type UtilSummary = {

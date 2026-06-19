@@ -23,7 +23,21 @@ shopt -s nullglob   # an empty icons dir should expand to nothing, not a literal
 
 # --- paths (XDG) ---
 ICON_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/decal/icons"   # drop <App>.icns here
-SYMLINK_PATH="${XDG_BIN_HOME:-$HOME/.local/bin}/decal"
+BIN_PATH="${XDG_BIN_HOME:-$HOME/.local/bin}/decal"
+
+# --- banner ---
+# bold-cyan figlet banner (speed font); shown atop --help and each interactive run.
+_banner() {
+    printf '\n%s%s' "$B" "$C"
+    cat <<'BANNER'
+  _________                 ______
+  ______  /________________ ___  /
+  _  __  /_  _ \  ___/  __ `/_  /
+  / /_/ / /  __/ /__ / /_/ /_  /
+  \__,_/  \___/\___/ \__,_/ /_/
+BANNER
+    printf '%s' "$X"
+}
 
 # --- helpers ---
 _need_fileicon() {
@@ -58,6 +72,76 @@ _set_icon() {  # app icns
     return 1
 }
 
+# Make a just-changed icon show up without a re-login — as targeted as macOS
+# allows. Per changed app: bump its mtime (invalidates that one app's entry in
+# the per-file IconServices cache → Finder) and re-register it with Launch
+# Services (Spotlight, ⌘-Tab, third-party launchers). The Dock is the exception —
+# it keeps ONE combined icon cache with no per-app eviction, so it has to be
+# dropped wholesale; safe (a brief flicker as Dock icons rebuild), just not
+# surgical. Raycast caches icons and won't relaunch itself, so restart each
+# variant that's running (stable and/or Beta) — wait for full exit first, else
+# `open` races the SIGTERM, foregrounds the dying process, and leaves it closed.
+# Last: the cache-bust + restart storm can itself race Finder/LaunchServices into
+# re-scanning a just-set bundle and dropping its fresh icon (intermittent — this is
+# the "icon reverts to a generic/folder icon after a while" bug). So once the dust
+# settles, re-assert every changed icon as the final act: a set with nothing
+# disruptive after it sticks.
+_refresh_ui() {   # args: app bundles whose icon just changed
+    local bounced="Dock · Finder"
+    local lsr=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+    local app
+    for app in "$@"; do
+        [[ -e "$app" ]] || continue
+        touch "$app" 2>/dev/null || true
+        [[ -x "$lsr" ]] && "$lsr" -f "$app" >/dev/null 2>&1 || true
+    done
+    local c; c="$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null || true)"
+    [[ "$c" == /* ]] && rm -f "${c}com.apple.dock.iconcache" 2>/dev/null || true
+    killall Dock   >/dev/null 2>&1 || true
+    killall Finder >/dev/null 2>&1 || true
+    local rc
+    for rc in "Raycast" "Raycast Beta"; do
+        pgrep -x "$rc" >/dev/null 2>&1 || continue
+        killall "$rc" >/dev/null 2>&1 || true
+        # Wait for FULL exit (up to 10s) before reopening. open-ing a still-
+        # terminating instance only activates the dying process, which then
+        # finishes quitting — leaving it closed. A fixed short wait that proceeds
+        # anyway just loses this race intermittently (slow shutdowns under load).
+        local n=0
+        while pgrep -x "$rc" >/dev/null 2>&1 && [[ $n -lt 100 ]]; do sleep 0.1; n=$((n + 1)); done
+        if pgrep -x "$rc" >/dev/null 2>&1; then
+            _err "$rc didn't quit within 10s — left closed; rerun 'decal' when it's idle"
+            continue
+        fi
+        open -a "$rc" >/dev/null 2>&1 || true
+        # Confirm it actually came back: Launch Services can swallow an open that
+        # races the just-freed single-instance slot. Retry once if it didn't.
+        n=0
+        while ! pgrep -x "$rc" >/dev/null 2>&1 && [[ $n -lt 50 ]]; do sleep 0.1; n=$((n + 1)); done
+        pgrep -x "$rc" >/dev/null 2>&1 || open -a "$rc" >/dev/null 2>&1 || true
+        bounced="$bounced · $rc"
+    done
+    # Re-assert icons after the storm (see header). Wait for Finder to come back,
+    # let it settle, then for each changed app whose icns still exists (an rm'd app
+    # has none → skipped) confirm the icon survived and re-set it if the race ate it.
+    if command -v fileicon >/dev/null 2>&1; then
+        local name reicns attempt wf=0
+        while [[ $wf -lt 20 ]] && ! pgrep -x Finder >/dev/null 2>&1; do sleep 0.1; wf=$((wf + 1)); done
+        sleep 0.5
+        for app in "$@"; do
+            [[ -e "$app" ]] || continue
+            name="$(_appname "$app")"; reicns="$ICON_DIR/$name.icns"
+            [[ -f "$reicns" ]] || continue
+            for attempt in 1 2 3; do
+                if fileicon test "$app" >/dev/null 2>&1; then break; fi
+                fileicon set "$app" "$reicns" >/dev/null 2>&1 || true
+                sleep 0.3
+            done
+        done
+    fi
+    printf '%s↻%s %srestarted %s so the change shows%s\n' "$C" "$X" "$D" "$bounced" "$X"
+}
+
 # --- commands ---
 cmd_add() {
     local app_arg="${1:-}" icns="${2:-}" name app
@@ -70,8 +154,8 @@ cmd_add() {
     mkdir -p "$ICON_DIR"
     cp -f "$icns" "$ICON_DIR/$name.icns"   # decal keeps its own copy — the source path no longer matters
     _set_icon "$app" "$ICON_DIR/$name.icns" || return 1
-    killall Dock >/dev/null 2>&1 || true
     _ok "set + saved ${B}$name${X}  ${D}(${ICON_DIR/#$HOME/~}/$name.icns)${X}"
+    _refresh_ui "$app"
 }
 
 cmd_rm() {
@@ -82,11 +166,12 @@ cmd_rm() {
     app="$(_findapp "$name")"
     if [[ -n "$app" ]] && command -v fileicon >/dev/null 2>&1; then fileicon rm "$app" >/dev/null 2>&1 || true; fi
     rm -f "$ICON_DIR/$name.icns"
-    killall Dock >/dev/null 2>&1 || true
     _ok "removed ${B}$name${X} (restored default icon)"
+    _refresh_ui "$app"
 }
 
 cmd_ls() {
+    [[ -t 1 ]] && { _banner; printf '\n'; }
     local f name app status any=1
     if [[ -d "$ICON_DIR" ]]; then
         for f in "$ICON_DIR"/*.icns; do
@@ -105,24 +190,26 @@ cmd_ls() {
 }
 
 cmd_apply() {
+    [[ -t 1 ]] && { _banner; printf '\n'; }
     local files=( "$ICON_DIR"/*.icns )
     [[ ${#files[@]} -gt 0 ]] || { _info "no icons yet — decal add <app> <icns>, or drop files in ${ICON_DIR/#$HOME/~}"; return 0; }
     _need_fileicon
-    local f name app ok=0 skip=0 fail=0
+    local f name app ok=0 skip=0 fail=0 changed=()
     for f in "${files[@]}"; do
         name="$(basename "${f%.icns}")"; app="$(_findapp "$name")"
         if [[ -z "$app" ]]; then _err "skip $name (no $name.app found)"; skip=$((skip+1)); continue; fi
         if fileicon test "$app" >/dev/null 2>&1; then _info "ok    $name (already set)"; ok=$((ok+1)); continue; fi
-        if _set_icon "$app" "$f"; then _ok "applied ${B}$name${X}"; ok=$((ok+1)); else fail=$((fail+1)); fi
+        if _set_icon "$app" "$f"; then _ok "applied ${B}$name${X}"; ok=$((ok+1)); changed+=("$app"); else fail=$((fail+1)); fi
     done
-    killall Dock >/dev/null 2>&1 || true
     _info "done — $ok ok, $skip skipped, $fail failed"
+    # refresh only the apps whose icon actually changed (empty = nothing to do)
+    [[ ${#changed[@]} -gt 0 ]] && _refresh_ui "${changed[@]}"
     [[ $fail -eq 0 ]]
 }
 
 cmd_teardown() {
     local root="${ICON_DIR%/icons}"
-    printf '%sdecal teardown%s will restore default icons, delete %s, and remove %s.\n' "$B" "$X" "${root/#$HOME/~}" "${SYMLINK_PATH/#$HOME/~}"
+    printf '%sdecal teardown%s will restore default icons, delete %s, and remove %s.\n' "$B" "$X" "${root/#$HOME/~}" "${BIN_PATH/#$HOME/~}"
     printf 'Continue? [y/N] '
     local ans=""; read -r ans || true
     _yes "${ans:-n}" || { _info "aborted — nothing changed"; return 0; }
@@ -134,23 +221,15 @@ cmd_teardown() {
         done
     fi
     rm -rf "$root"
-    rm -f "$SYMLINK_PATH"
-    killall Dock >/dev/null 2>&1 || true
+    rm -f "$BIN_PATH"
     _ok "decal removed; app icons restored to default"
+    _refresh_ui
 }
 
 usage() {
-    printf '\n'
-    printf '%s%s' "$B" "$C"
-    cat <<'BANNER'
-  _________                 ______
-  ______  /________________ ___  /
-  _  __  /_  _ \  ___/  __ `/_  /
-  / /_/ / /  __/ /__ / /_/ /_  /
-  \__,_/  \___/\___/ \__,_/ /_/
-BANNER
-    printf '%s\n' "$X"
+    _banner
     cat <<EOF
+
   ${B}decal${X} ${D}— custom app icons that survive updates${X}
 
 ${C}How it works:${X}

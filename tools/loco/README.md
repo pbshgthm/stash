@@ -17,17 +17,19 @@ Instead of remembering `localhost:5180` / `localhost:42691` / `localhost:4321`, 
 - macOS (uses launchd and `/Library/LaunchDaemons`).
 - [Homebrew](https://brew.sh) — `loco init` will install Caddy if it's missing.
 - Stock bash 3.2 is fine. No other runtime deps.
+- *Optional, for tailnet mode:* [Tailscale](https://tailscale.com) (already set up) and `dnsmasq` — `loco tailnet on` installs `dnsmasq` if it's missing.
 
 ## Install
 
 ```
-curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install/loco | bash
+curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s loco
 loco init
 ```
 
-The first line drops `loco` into `~/.local/bin/`. The second is the one-time daemon setup. `init` is idempotent and does:
+The first line drops a **standalone copy** of `loco` into `~/.local/bin/` — it doesn't depend on this repo staying anywhere, so the command keeps working even if you never clone (or later move the clone). The second is the one-time daemon setup. `init` is idempotent and does:
 
 - `brew install caddy` if it isn't already.
+- Ensures the `loco` binary is in `~/.local/bin/` (a standalone copy).
 - Creates `~/.config/loco/` and generates an initial `Caddyfile`.
 - Installs `/Library/LaunchDaemons/com.loco.caddy.plist` (requires `sudo`) and boots it. Caddy now auto-starts on every login.
 
@@ -39,7 +41,7 @@ Make sure `~/.local/bin` is on your `PATH` — the installer prints the line to 
 
 | Command | What it does |
 |---|---|
-| `loco init` | First-time setup (brew + symlink + dirs + plist + start). |
+| `loco init` | First-time setup (caddy + binary + dirs + Caddyfile + daemon). |
 | `loco start` | Start the Caddy daemon. Re-enables auto-start on boot. |
 | `loco stop` | Stop the Caddy daemon. Disables auto-start until next `loco start`. |
 | `loco status` | Show daemon state, LAN IP, and the full registry. |
@@ -58,6 +60,20 @@ Adding or removing reloads Caddy live — no daemon restart, no dropped connecti
 
 A name can contain dots: `loco add admin.myapp 5181` produces `http://admin.myapp.localhost`.
 
+### Tailnet
+
+Optionally serve every project across your [Tailscale](https://tailscale.com) network, not just locally. With tailnet mode on, each project answers at **both** `name.localhost` (this machine) **and** `name.<tailscale-name>` (every device on your tailnet) — `.localhost` is never affected.
+
+| Command | What it does |
+|---|---|
+| `loco tailnet on` | Enable. Detects this machine's tailscale name + IP, stands up a `dnsmasq` wildcard resolver for `*.<name>`, writes `/etc/resolver/<name>` for local resolution, and adds the second hostname to every Caddy block. |
+| `loco tailnet off` | Disable. Removes the dnsmasq daemon, resolver file, and config; regenerates the Caddyfile back to `.localhost` only. |
+| `loco tailnet status` | Show the tailnet domain, resolver IP, and dnsmasq state. |
+
+**One manual step.** So your *other* devices (laptops, phone) can resolve `name.<tailscale-name>`, add a split-DNS nameserver once in the Tailscale admin console: **DNS → Add nameserver → Custom**, set it to this machine's tailscale IP, and **Restrict to domain** `<tailscale-name>`. `loco tailnet on` prints the exact values. This machine resolves the domain locally without that step — it's only needed tailnet-wide (and it's the only way iOS devices, which have no `/etc/resolver`, can resolve it).
+
+**HTTP only.** `.<tailscale-name>` isn't a public TLD, so there's no valid TLS cert — tailnet access is plain `http://`, consistent with loco's `auto_https off`.
+
 ### Ports
 
 Port utilities, built on `lsof`:
@@ -74,17 +90,24 @@ Port utilities, built on `lsof`:
 - `com.loco.caddy` is a **system** LaunchDaemon so it starts at boot without anyone being logged in. The plist must be owned `root:wheel 644` — launchd refuses user-owned plists in `/Library/LaunchDaemons`. `init` takes care of this via `sudo install`.
 - Logs land in `~/.local/state/loco/caddy.log` and `caddy.err.log`.
 - Caddy's own data (certs, state) lives under `~/.local/share/caddy/`.
+- **Tailnet mode** (`loco tailnet on`) adds a second hostname per block — `name.localhost, name.<tailscale-name>` — and runs a small `dnsmasq` (its own `com.loco.dnsmasq` LaunchDaemon) that answers the `*.<tailscale-name>` wildcard with this machine's tailscale IP. `/etc/resolver/<tailscale-name>` points local lookups at it; a one-time Tailscale split-DNS nameserver entry covers the rest of the tailnet. `dnsmasq` binds loopback + the tailscale IP only, with `no-resolv`, so it's authoritative for that one domain and never a general/open resolver.
 
 ## Files
 
 ```
 ~/.config/loco/projects.conf        registry (human-editable, survives teardown by default)
 ~/.config/loco/Caddyfile             generated — do not edit
+~/.config/loco/tailnet.enabled       tailnet flag — holds "<name> <ip>" when on
+~/.config/loco/dnsmasq.conf          generated — *.<tailscale-name> wildcard (tailnet)
 ~/.local/state/loco/caddy.log        stdout
 ~/.local/state/loco/caddy.err.log    stderr
+~/.local/state/loco/dnsmasq.log      dnsmasq stdout (tailnet)
+~/.local/state/loco/dnsmasq.err.log  dnsmasq stderr (tailnet)
 ~/.local/share/caddy/                caddy internal data
-~/.local/bin/loco                    symlink to the script
+~/.local/bin/loco                    standalone copy of the script
 /Library/LaunchDaemons/com.loco.caddy.plist
+/Library/LaunchDaemons/com.loco.dnsmasq.plist    (tailnet)
+/etc/resolver/<tailscale-name>                   (tailnet) local resolver entry
 ```
 
 `loco paths` prints these.
@@ -95,7 +118,7 @@ Port utilities, built on `lsof`:
 loco teardown
 ```
 
-Stops and unloads the daemon, removes the plist, removes the bin symlink, removes logs and caddy data. Then asks separately whether you want to delete `projects.conf` (kept by default — you'll probably want it if you re-install later) and whether to `brew uninstall caddy`.
+Stops and unloads the caddy daemon (and the dnsmasq daemon, if tailnet was enabled), removes the plists, the bin copy, the dnsmasq config and `/etc/resolver/<name>` entry, logs, and caddy data. Then asks separately whether you want to delete `projects.conf` (kept by default — you'll probably want it if you re-install later) and whether to `brew uninstall caddy` / `dnsmasq`. If you enabled tailnet, it also reminds you to remove the split-DNS nameserver from the Tailscale admin console (loco can't do that for you).
 
 After "yes" everywhere, the only thing left is the script file itself.
 

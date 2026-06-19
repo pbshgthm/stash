@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# wakey — keep your Mac awake from the terminal, by driving Amphetamine
+set -euo pipefail
+
+# --- style ---
+# Status IS the output, so it goes to stdout — guard color on -t 1.
+if [[ -t 1 ]]; then
+    B=$'\033[1m'  D=$'\033[2m'  G=$'\033[32m'  R=$'\033[31m'
+    C=$'\033[36m' W=$'\033[37m' Y=$'\033[33m'  X=$'\033[0m'
+else
+    B= D= G= R= C= W= Y= X=
+fi
+
+_ok()   { printf '%s\n' "${G}ok${X}  ${D}$*${X}"; }
+_err()  { printf '%s\n' "${R}error${X}  $*" >&2; }
+_info() { printf '%s\n' "${D}$*${X}" >&2; }
+_die()  { _err "$*"; exit 1; }
+
+# wakey is a remote control, not the engine: Amphetamine holds the session and does
+# the sleep-blocking. We just send it AppleScript verbs, so its menu-bar UI and the
+# CLI are one and the same state — there's no second assertion to drift out of sync.
+
+# --- banner ---
+# Bold-cyan figlet banner (speed font); shown atop --help and each interactive run.
+_banner() {
+    printf '\n%s%s' "$B" "$C"
+    cat <<'BANNER'
+                     ______
+  ___      _______ ___  /___________  __
+  __ | /| / /  __ `/_  //_/  _ \_  / / /
+  __ |/ |/ // /_/ /_  ,<  /  __/  /_/ /
+  ____/|__/ \__,_/ /_/|_| \___/_\__, /
+                               /____/
+BANNER
+    printf '%s' "$X"
+}
+
+# --- helpers ---
+
+# Run one Amphetamine AppleScript verb. Value-returning verbs echo their result.
+# Surfaces the two failures users actually hit: app missing, automation denied.
+_amph() {
+    local out
+    if ! out=$(osascript -e "tell application \"Amphetamine\" to $1" 2>&1); then
+        case $out in
+            *-1743*|*[Nn]ot\ authoriz*|*"not allowed"*)
+                _die "macOS is blocking control of Amphetamine — grant your terminal access under ${W}System Settings ▸ Privacy & Security ▸ Automation${X}, then retry." ;;
+            *)
+                _die "couldn't talk to Amphetamine: $out" ;;
+        esac
+    fi
+    printf '%s' "$out"
+}
+
+# `id of application` asks Launch Services — confirms install without launching it.
+_require_amph() {
+    osascript -e 'id of application "Amphetamine"' >/dev/null 2>&1 \
+        || _die "Amphetamine isn't installed — it's free on the Mac App Store: ${W}https://apps.apple.com/app/amphetamine/id937984704${X}"
+}
+
+# Closed-lid keep-awake only means something on a machine with a lid.
+_is_laptop() { pmset -g batt 2>/dev/null | grep -qi 'InternalBattery'; }
+
+# Duration token → "DURATION INTERVAL" for Amphetamine's options record.
+# 30m → "30 minutes" · 2h → "2 hours" · 90 → "90 minutes" · empty → "0 0" (forever).
+_parse_dur() {
+    local d="${1:-}"
+    [[ -z $d ]] && { printf '0 0'; return 0; }
+    case $d in
+        *h) d=${d%h}; [[ $d =~ ^[0-9]+$ ]] || return 1; printf '%s hours'   "$d" ;;
+        *m) d=${d%m}; [[ $d =~ ^[0-9]+$ ]] || return 1; printf '%s minutes' "$d" ;;
+        *)        [[ $d =~ ^[0-9]+$ ]] || return 1; printf '%s minutes' "$d" ;;
+    esac
+}
+
+_fmt_left() {  # seconds → "1h 58m" / "25m" / "40s"
+    local s=$1 h=$(( $1 / 3600 )) m=$(( ($1 % 3600) / 60 ))
+    if   (( h > 0 )); then printf '%dh %dm' "$h" "$m"
+    elif (( m > 0 )); then printf '%dm' "$m"
+    else                   printf '%ds' "$s"; fi
+}
+
+# Start a session. $1=duration $2=interval $3=displaySleepAllowed $4=keep-awake-when-lid-closed.
+# Returns 3 if lid keep-awake was asked for but didn't take (Amphetamine's one-time warning).
+_session_start() {
+    local dur=$1 int=$2 dsa=$3 lid=$4
+    _amph "start new session with options {duration:$dur, interval:$int, displaySleepAllowed:$dsa}" >/dev/null
+    # Must run AFTER the session starts — it edits the live session's properties.
+    if (( lid )) && _is_laptop; then
+        _amph "enable closed display mode" >/dev/null
+        [[ $(_amph "closed display mode enabled") == "true" ]] || return 3
+    fi
+    return 0
+}
+
+# --- the one renderer: current state as a status line + aligned rows ---
+# on / off / status all end here, so what's printed always matches reality.
+_render_state() {
+    if [[ $(_amph "session is active") != "true" ]]; then
+        printf '\n  %s○%s  %soff%s  %s· the Mac sleeps normally%s\n\n' "$D" "$X" "$B" "$X" "$D" "$X"
+        return 0
+    fi
+
+    local rem; rem=$(_amph "session time remaining")
+    local left
+    case $rem in
+        0)  left="no time limit" ;;
+        -1) left="trigger session" ;;
+        -2) left="app / time session" ;;
+        -3) left="ending…" ;;
+        *)  left="$(_fmt_left "$rem") left" ;;
+    esac
+
+    local sys
+    if _is_laptop; then
+        if [[ $(_amph "closed display mode enabled") == "true" ]]; then
+            sys="never sleeps — even with the lid shut"
+        else
+            sys="never sleeps — but will if you shut the lid"
+        fi
+    else
+        sys="never sleeps"
+    fi
+
+    local disp="can sleep on idle"
+    [[ $(_amph "display sleep allowed") == "true" ]] || disp="stays on"
+
+    printf '\n  %s●%s  %sawake%s  %s· %s%s\n\n' "$G" "$X" "$B" "$X" "$D" "$left" "$X"
+    printf '    %s▸ system %s  %s%s%s\n' "$C" "$X" "$W" "$sys" "$X"
+    printf '    %s▸ display%s  %s%s%s\n' "$C" "$X" "$D" "$disp" "$X"
+    printf '\n'
+}
+
+# Interactive runs lead with the banner (stripped when piped), then the state.
+_show() { [[ -t 1 ]] && _banner; _render_state; }
+
+# --- commands ---
+
+cmd_on() {
+    local dsa="true"   # default: let the screen sleep — only the system stays up
+    local lid=1        # default: keep running even with the lid shut (laptops)
+    local tok=""
+    while (( $# )); do
+        case $1 in
+            -d|--display)   dsa="false"; shift ;;
+            --lid-sleep)    lid=0; shift ;;
+            -h|--help)      usage; exit 0 ;;
+            -*)             _die "unknown flag: $1  ${D}(try: wakey --help)${X}" ;;
+            *)              [[ -z $tok ]] || _die "unexpected extra argument: $1"; tok=$1; shift ;;
+        esac
+    done
+
+    local parsed
+    parsed=$(_parse_dur "$tok") || _die "bad duration: ${W}$tok${X}  ${D}(use 30m, 2h, or a plain number of minutes)${X}"
+
+    local rc=0
+    _session_start "${parsed% *}" "${parsed#* }" "$dsa" "$lid" || rc=$?
+    _show
+
+    if (( rc == 3 )); then
+        _err "lid keep-awake needs a one-time OK inside Amphetamine"
+        _info "  Amphetamine ▸ Preferences ▸ Sessions → toggle \"Allow System to Sleep"
+        _info "  When Display is Closed\", and tick \"Do Not Show This Message Again\""
+        _info "  in the warning. Then run ${B}wakey on${X} again — you're awake meanwhile."
+    fi
+}
+
+cmd_off() {
+    _amph "end session" >/dev/null
+    _show
+}
+
+cmd_status() { _show; }
+
+cmd_while() {
+    [[ $# -ge 1 ]] || { _err "give it a command: ${B}wakey while <cmd…>${X}"; _info "  e.g. wakey while make build"; return 1; }
+    _session_start 0 0 true 1 >/dev/null || true     # best-effort; lid hint is for `on`
+    # End the session however the command exits — success, failure, or Ctrl-C.
+    trap '_amph "end session" >/dev/null 2>&1 || true' EXIT INT TERM
+    [[ -t 1 ]] && printf '  %s●%s %sawake%s %swhile %s%s%s runs%s\n' "$G" "$X" "$B" "$X" "$D" "$W" "$*" "$D" "$X"
+    "$@"
+}
+
+# --- help ---
+usage() {
+    _banner
+    cat <<EOF
+
+  ${B}wakey${X} ${D}— keep your Mac awake from the terminal (a CLI for Amphetamine)${X}
+
+  ${D}A session keeps the ${X}${B}system${X}${D} from sleeping — even with the lid shut —${X}
+  ${D}while still letting the ${X}${B}screen${X}${D} go dark to save power.${X}
+
+${C}Commands:${X}
+  ${B}wakey on${X} ${D}[when]${X}       start a session  ${D}· default: no time limit${X}
+  ${B}wakey off${X}             stop — let the Mac sleep normally again
+  ${B}wakey status${X}          show the current state  ${D}· also: just ${X}${B}wakey${X}
+  ${B}wakey while${X} ${D}<cmd…>${X}    stay awake only while a command runs, then stop
+
+${C}When:${X}
+  ${W}30m${X}   ${D}minutes${X}      ${W}2h${X}   ${D}hours${X}      ${W}90${X}   ${D}plain number = minutes${X}      ${D}omit = forever${X}
+
+${C}On options:${X}
+  ${B}-d${X}, ${B}--display${X}        keep the ${B}screen${X} on too ${D}(don't let it go dark)${X}
+      ${B}--lid-sleep${X}      let the Mac sleep when the lid closes
+  ${B}-h${X}, ${B}--help${X}           this help
+
+${C}First run, once:${X}
+  ${D}1. macOS asks to let your terminal control Amphetamine — click ${X}${B}OK${X}${D}.${X}
+  ${D}2. For the lid-shut part, set it up once in Amphetamine ▸ Preferences ▸${X}
+  ${D}   Sessions ▸ "Allow System to Sleep When Display is Closed". wakey tells${X}
+  ${D}   you if it's still needed.${X}
+
+${C}Examples:${X}
+  ${D}\$${X} wakey on              ${D}# forever; screen may dim; survives shutting the lid${X}
+  ${D}\$${X} wakey on 25m          ${D}# a pomodoro${X}
+  ${D}\$${X} wakey on 2h -d        ${D}# 2h, screen stays on too (a demo, a download you watch)${X}
+  ${D}\$${X} wakey while make      ${D}# awake until the build ends, then off automatically${X}
+  ${D}\$${X} wakey off
+EOF
+}
+
+# --- main ---
+main() {
+    [[ "$(uname -s)" == "Darwin" ]] || _die "wakey is macOS-only (it drives Amphetamine)"
+
+    local cmd="${1:-status}"
+    [[ $# -gt 0 ]] && shift
+
+    case "$cmd" in
+        on)              _require_amph; cmd_on "$@" ;;
+        off)             _require_amph; cmd_off ;;
+        status|st)       _require_amph; cmd_status ;;
+        while)           _require_amph; cmd_while "$@" ;;
+        -h|--help|help)  usage ;;
+        *)               _err "unknown command: ${W}$cmd${X}"; _info "  try: wakey --help"; exit 1 ;;
+    esac
+}
+# Run only when executed, not when sourced (lets tests load the functions).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi

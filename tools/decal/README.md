@@ -42,7 +42,7 @@ Then, forever after, whenever an app updates and loses its icon: just run `decal
 
 - Icons live in `~/.config/decal/icons/` as `<App>.icns`. That folder is the entire state — back it up / sync it and your icons follow.
 - `apply` (the default) walks the folder and, for each `<App>.icns`, sets it on `/Applications/<App>.app` (or `~/Applications/<App>.app`). It skips apps whose icon is already set, so it's cheap to re-run.
-- Setting/removing icons is delegated to `fileicon`, which writes the icon into the bundle and flips the `kHasCustomIcon` flag. decal then bumps the bundle's mtime and restarts the Dock so Finder/Dock/⌘-Tab refresh immediately.
+- Setting/removing icons is delegated to `fileicon`, which writes the icon into the bundle and flips the `kHasCustomIcon` flag. decal then bumps the bundle's mtime and bounces the UIs that cache app icons so the change shows up immediately: it restarts the **Dock** (Dock + ⌘-Tab) and **Finder** (both relaunch themselves), and — only if it's already running — restarts **Raycast** (stable or **Raycast Beta**, whichever is up; it doesn't auto-relaunch, so decal waits for it to quit, then re-opens it).
 
 ## Permissions
 
