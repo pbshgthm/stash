@@ -1,0 +1,137 @@
+---
+interface Props {
+  slug: string;
+  tagline: string;
+  blurb: string;
+  color: string;
+  index: number;
+}
+
+const { slug, tagline, blurb, color, index } = Astro.props;
+const num = String(index + 1).padStart(2, "0");
+const install = `curl -fsSL https://raw.githubusercontent.com/pbshgthm/stash/main/install | bash -s ${slug}`;
+const href = `${import.meta.env.BASE_URL}${slug}`;
+---
+
+<details class="tool" style={`--util-color: ${color}`}>
+  <summary
+    class="flex cursor-pointer select-none items-center gap-4 border-b border-line py-6 transition-colors hover:border-line-strong"
+  >
+    <span class="font-mono text-[12px] tabular text-faint">{num}</span>
+    <span class="tool-dot h-1.5 w-1.5 shrink-0 rounded-full"></span>
+    <span class="font-mono text-[17px] font-medium tracking-tight text-fg">
+      {slug}
+    </span>
+    <span class="min-w-0 flex-1 truncate text-[14px] text-muted">
+      {tagline}
+    </span>
+    <span class="tool-mark font-mono text-[18px] leading-none text-faint transition-transform duration-300">
+      +
+    </span>
+  </summary>
+
+  <div class="tool-body border-b border-line pt-6 pb-10 pl-8 sm:pl-9">
+    <p class="max-w-2xl text-[14.5px] leading-relaxed text-fg-soft">
+      {blurb}
+    </p>
+
+    <!-- command bar: scrolling field + a separate copy cell, never overlap -->
+    <div
+      class="mt-6 flex max-w-2xl items-stretch overflow-hidden rounded-md border border-line bg-bg-soft font-mono text-[13px]"
+    >
+      <code
+        class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap py-3 pr-3 pl-4 text-fg-soft"
+        >{install}</code
+      >
+      <button
+        type="button"
+        data-copy={install}
+        aria-label="Copy install command"
+        class="copy grid w-11 shrink-0 place-items-center border-l border-line text-faint transition-colors hover:bg-surface hover:text-fg"
+      >
+        <svg class="copy-i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+          <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+        </svg>
+        <svg class="check-i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5"></path>
+        </svg>
+      </button>
+    </div>
+
+    <a
+      href={href}
+      class="readme mt-6 inline-flex items-center gap-1.5 font-mono text-[13px] text-fg-soft transition-colors hover:text-fg"
+    >
+      read the full readme
+      <span aria-hidden="true">→</span>
+    </a>
+  </div>
+</details>
+
+<style>
+  .tool > summary {
+    list-style: none;
+  }
+  .tool > summary::-webkit-details-marker {
+    display: none;
+  }
+  .tool-dot {
+    background: var(--util-color);
+  }
+  details[open] .tool-mark {
+    transform: rotate(45deg);
+    color: var(--util-color);
+  }
+  details[open] > summary {
+    border-bottom-color: transparent;
+  }
+  .readme {
+    text-underline-offset: 3px;
+  }
+  .readme:hover {
+    color: var(--util-color);
+  }
+  /* subtle, smooth reveal when a row opens */
+  @media (prefers-reduced-motion: no-preference) {
+    details[open] > .tool-body {
+      animation: tool-reveal 0.24s ease both;
+    }
+  }
+  @keyframes tool-reveal {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  /* copy icon ↔ check icon swap */
+  .check-i {
+    display: none;
+  }
+  .copy[data-copied] .copy-i {
+    display: none;
+  }
+  .copy[data-copied] .check-i {
+    display: block;
+    color: var(--util-color);
+  }
+</style>
+
+<script>
+  document.querySelectorAll("button.copy[data-copy]").forEach((el) => {
+    const btn = el as HTMLButtonElement;
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(btn.getAttribute("data-copy") || "");
+      } catch {
+        return;
+      }
+      btn.setAttribute("data-copied", "");
+      window.setTimeout(() => btn.removeAttribute("data-copied"), 1400);
+    });
+  });
+</script>

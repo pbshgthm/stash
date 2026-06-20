@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { getCollection } from 'astro:content';
 import { summarize } from './parse';
 import { colorOf } from './colors';
+import { describe } from './descriptions';
 
-// utils.ts lives at docs/src/lib/ — three `..` reach the repo root.
+// utils.ts lives at docs/src/lib/, three `..` reach the repo root.
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 // Per repo convention every tool lives at `tools/<slug>/<slug>` with the
@@ -25,6 +26,7 @@ export type UtilCard = {
   slug: string;
   banner: string;
   tagline: string;
+  blurb: string;
   color: string;
 };
 
@@ -32,11 +34,11 @@ export async function getUtils(): Promise<UtilCard[]> {
   const entries = await getCollection('utils');
   return entries
     .filter((e) => hasExecSibling(e.id))
-    .map((e) => ({
-      slug: e.id,
-      color: colorOf(e.id),
-      ...summarize(e.body ?? ''),
-    }))
+    .map((e) => {
+      const parsed = summarize(e.body ?? '');
+      const { tagline, blurb } = describe(e.id, parsed);
+      return { slug: e.id, color: colorOf(e.id), banner: parsed.banner, tagline, blurb };
+    })
     .sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
